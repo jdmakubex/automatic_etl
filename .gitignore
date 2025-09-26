@@ -4,6 +4,7 @@ generated/**
 .env
 .env.*
 !.env.example
+<<<<<<< HEAD
 =======
 # Ignora todo dentro de generated/
 generated/**
@@ -16,3 +17,5 @@ generated/**
 # Excepto el marcador para mantener la carpeta en el repo
 !generated/.gitkeep
 >>>>>>> 571627b (first commit)
+=======
+>>>>>>> b86747d (Ignorar .env y dejar de trackearlo)

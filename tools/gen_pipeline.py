@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os, json, re
 from pathlib import Path
+import pathlib
 ROOT = Path(__file__).resolve().parent.parent
 try:
     from dotenv import load_dotenv; load_dotenv(ROOT / ".env")

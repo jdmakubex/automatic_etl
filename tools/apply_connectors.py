@@ -1,71 +1,88 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# tools/apply_connectors.py  (encabezado robusto)
-import pathlib
-import os, json, time
-from pathlib import Path  
+# tools/apply_connectors.py
+import os, json, time, sys
+from pathlib import Path
 import requests
 
+# Carga .env si existe y si python-dotenv está disponible; si no, seguimos con las env del contenedor
 ROOT = Path(__file__).resolve().parent.parent  # /app
-
-# Carga .env si existe y si python-dotenv está instalado; si no, sigue con env del contenedor
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # opcional
     load_dotenv(ROOT / ".env")
 except Exception:
     pass
 
 CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
-DB_CONNS = json.loads(os.getenv("DB_CONNECTIONS", "[]"))
 
+def ensure_connector(name: str, config: dict):
+    r = requests.get(f"{CONNECT_URL}/connectors/{name}")
+    if r.status_code == 200:
+        r = requests.put(f"{CONNECT_URL}/connectors/{name}/config", json=config)
+        r.raise_for_status()
+        print(f"[CONNECT] Updated: {name}")
+    elif r.status_code == 404:
+        r = requests.post(f"{CONNECT_URL}/connectors", json={"name": name, "config": config})
+        r.raise_for_status()
+        print(f"[CONNECT] Created: {name}")
+    else:
+        print(f"[CONNECT][ERROR] GET {name}: {r.status_code} {r.text}")
+        r.raise_for_status()
 
-
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-GEN = ROOT / "generated"
-
-def wait(url, timeout=180):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        try:
-            r = requests.get(url + "/connectors", timeout=5)
-            if r.ok: return True
-        except Exception:
-            pass
-        time.sleep(2)
-    return False
+def make_mysql_cfg(db: dict):
+    dbname = db["db"]
+    prefix = f"dbserver_{dbname}"
+    name = f"debezium-mysql-{dbname}"
+    return name, {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "tasks.max": "1",
+        "database.hostname": db["host"],
+        "database.port": str(db.get("port", 3306)),
+        "database.user": db["user"],
+        "database.password": db["pass"],
+        "database.server.id": str(5400 + int(time.time()) % 500),
+        "database.server.name": prefix,
+        "database.include.list": dbname,
+        "include.schema.changes": "false",
+        # Historial en Kafka
+        "database.history.kafka.bootstrap.servers": "kafka-1:9092",
+        "database.history.kafka.topic": f"{prefix}.history",
+        # JSON sin schema
+        "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "key.converter.schemas.enable": "false",
+        "value.converter.schemas.enable": "false",
+        # Snapshot inicial (ajusta si ya hiciste BULK de esa tabla)
+        "snapshot.mode": "initial",
+        # Tópicos por defecto
+        "topic.creation.default.replication.factor": "1",
+        "topic.creation.default.partitions": "3",
+    }
 
 def main():
-    load_dotenv(ROOT / ".env")
-    url = os.getenv("DEBEZIUM_CONNECT_URL", "http://connect-1:8083").rstrip("/")
-    wait(url)
+    raw = os.getenv("DB_CONNECTIONS", "[]")
+    try:
+        conns = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] DB_CONNECTIONS no es JSON válido: {e}")
+        sys.exit(1)
 
-    ok = 0
-    for conn_dir in GEN.glob("*"):
-        cj = conn_dir / "connector.json"
-        if not cj.exists():
+    mysql_conns = [c for c in conns if c.get("type") == "mysql"]
+    if not mysql_conns:
+        print("[WARN] No hay conexiones MySQL en DB_CONNECTIONS; nada que hacer.")
+        return
+
+    for db in mysql_conns:
+        required = ("host","user","pass","db")
+        if any(k not in db for k in required):
+            print(f"[WARN] Conexión incompleta, se omite: {db}")
             continue
-        payload = json.loads(cj.read_text(encoding="utf-8"))
-        name = payload.get("name") or conn_dir.name
-        print(f"Registrando conector: {name} ...")
-        r = requests.post(f"{url}/connectors", json=payload, timeout=30)
-        if r.status_code in (200, 201): 
-            ok += 1
-            print(f"  ✔ {name} -> {r.status_code}")
-        elif r.status_code == 409:
-            print(f"  ≈ {name} ya existe (409). PUT /connectors/{name}/config ...")
-            r2 = requests.put(f"{url}/connectors/{name}/config", json=payload["config"], timeout=30)
-            r2.raise_for_status()
-            ok += 1
-            print(f"  ✔ {name} actualizado")
-        else:
-            print(f"  ✖ {name} -> {r.status_code}: {r.text}")
-    print(f"Conectores aplicados: {ok}")
+        name, cfg = make_mysql_cfg(db)
+        ensure_connector(name, cfg)
 
 if __name__ == "__main__":
     try:
         main()
         print("[OK] Conectores Debezium aplicados")
-        raise SystemExit(0)
+        sys.exit(0)
     except Exception as e:
         print(f"[ERROR] {e}")
-        raise SystemExit(1)
+        sys.exit(1)
