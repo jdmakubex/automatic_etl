@@ -1,0 +1,439 @@
+networks:
+  etl_net:
+    driver: bridge
+
+volumes:
+  ch_data: {}
+  superset_home: {}
+  broker1_data: {}
+  broker2_data: {}
+  broker3_data: {}
+  controller1_data: {}
+  controller2_data: {}
+  controller3_data: {}
+  superset_venv: {}
+
+
+services:
+
+  configurator:
+    image: python:3.11-slim
+    container_name: configurator
+    working_dir: /app
+    env_file:
+      - .env
+    networks: [etl_net]
+    volumes:
+      - ./:/app
+      - ./.generated:/generated
+      - ./superset_bootstrap:/bootstrap
+    entrypoint: ["bash","-lc"]
+    command: |
+      set -euo pipefail;
+      python -m pip install --no-cache-dir -q python-dotenv;
+      python -c "import sys; print(sys.version)";
+      python tools/render_from_env.py
+    restart: "no"
+
+  # ---------- KRaft Controllers ----------
+  kafka-controller-1:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-controller-1
+    hostname: kafka-controller-1
+    environment:
+      KAFKA_PROCESS_ROLES: "controller"
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: "CONTROLLER://0.0.0.0:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-controller-1:29093,2@kafka-controller-2:29093,3@kafka-controller-3:29093"
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+    networks: [etl_net]
+    volumes:
+      - controller1_data:/var/lib/kafka/data
+
+  kafka-controller-2:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-controller-2
+    hostname: kafka-controller-2
+    environment:
+      KAFKA_PROCESS_ROLES: "controller"
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: "CONTROLLER://0.0.0.0:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-controller-1:29093,2@kafka-controller-2:29093,3@kafka-controller-3:29093"
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+    networks: [etl_net]
+    volumes:
+      - controller2_data:/var/lib/kafka/data
+
+  kafka-controller-3:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-controller-3
+    hostname: kafka-controller-3
+    environment:
+      KAFKA_PROCESS_ROLES: "controller"
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: "CONTROLLER://0.0.0.0:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-controller-1:29093,2@kafka-controller-2:29093,3@kafka-controller-3:29093"
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+    networks: [etl_net]
+    volumes:
+      - controller3_data:/var/lib/kafka/data
+
+  # ---------- Brokers ----------
+  kafka-1:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-1
+    hostname: kafka-1
+    depends_on:
+      kafka-controller-1: { condition: service_started }
+      kafka-controller-2: { condition: service_started }
+      kafka-controller-3: { condition: service_started }
+    environment:
+      KAFKA_PROCESS_ROLES: "broker"
+      KAFKA_NODE_ID: 4
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-controller-1:29093,2@kafka-controller-2:29093,3@kafka-controller-3:29093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "${KAFKA_DEFAULT_RF:-3}"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "${KAFKA_AUTO_CREATE_TOPICS:-true}"
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+    networks: [etl_net]
+    volumes:
+      - broker1_data:/var/lib/kafka/data
+    ports:
+      - "19092:9092"   # acceso desde host
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-2
+    hostname: kafka-2
+    depends_on:
+      kafka-controller-1: { condition: service_started }
+      kafka-controller-2: { condition: service_started }
+      kafka-controller-3: { condition: service_started }
+    environment:
+      KAFKA_PROCESS_ROLES: "broker"
+      KAFKA_NODE_ID: 5
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-controller-1:29093,2@kafka-controller-2:29093,3@kafka-controller-3:29093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "${KAFKA_DEFAULT_RF:-3}"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "${KAFKA_AUTO_CREATE_TOPICS:-true}"
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+    networks: [etl_net]
+    volumes:
+      - broker2_data:/var/lib/kafka/data
+
+  kafka-3:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-3
+    hostname: kafka-3
+    depends_on:
+      kafka-controller-1: { condition: service_started }
+      kafka-controller-2: { condition: service_started }
+      kafka-controller-3: { condition: service_started }
+    environment:
+      KAFKA_PROCESS_ROLES: "broker"
+      KAFKA_NODE_ID: 6
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-controller-1:29093,2@kafka-controller-2:29093,3@kafka-controller-3:29093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "${KAFKA_DEFAULT_RF:-3}"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "${KAFKA_AUTO_CREATE_TOPICS:-true}"
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+    networks: [etl_net]
+    volumes:
+      - broker3_data:/var/lib/kafka/data
+
+  # ---------- Kafka Connect ----------
+  connect:
+    image: confluentinc/cp-kafka-connect:7.5.0
+    container_name: connect
+    hostname: connect
+    depends_on:
+      kafka-1: { condition: service_started }
+      kafka-2: { condition: service_started }
+      kafka-3: { condition: service_started }
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+      CONNECT_LISTENERS: "http://0.0.0.0:8083"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: "connect-cluster"
+      CONNECT_CONFIG_STORAGE_TOPIC: "_connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "_connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "_connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_LOG4J_LOGGERS: "org.reflections=ERROR"
+      ENABLE_DEBEZIUM_SCRIPTING: "true"
+    networks: [etl_net]
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+  # ---------- ClickHouse ----------
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    networks: [etl_net]
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # TCP
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ./bootstrap/users.d:/etc/clickhouse-server/users.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client -q 'SELECT 1'"]
+      interval: 5s
+      timeout: 2s
+      retries: 40
+
+
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse-init
+    networks: [etl_net]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./bootstrap/clickhouse_init.sql:/init/init.sql:ro
+      - ./bootstrap/users.d:/etc/clickhouse-server/users.d:ro
+    # Ejecuta el cliente directamente; sin shell ni redirecciones
+    entrypoint: ["clickhouse-client"]
+    command: ["--host","clickhouse","--port","9000","--multiquery","--queries-file=/init/init.sql"]
+    restart: "no"
+
+
+
+
+  # --- INIT: prepara /app/.venv en un volumen persistente ---
+  superset-venv-setup:
+    image: apache/superset:latest
+    container_name: superset-venv-setup
+    user: "0:0"                        # root para escribir en /app/.venv
+    networks: [etl_net]
+    volumes:
+      - superset_venv:/app/.venv
+      - superset_home:/app/superset_home
+      - ./bootstrap:/bootstrap:ro      # <-- monta el script
+    #entrypoint: ["/bin/bash","/bootstrap/setup_venv.sh"]
+    entrypoint: ["bash","-lc"]
+    command: |
+      set -euo pipefail;
+      python -m venv /app/.venv;
+      /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel;
+      /app/.venv/bin/pip install clickhouse-connect==0.7.19 clickhouse-sqlalchemy==0.2.6;
+      chown -R 1000:1000 /app/.venv;
+      echo VENV_OK
+    restart: "no"
+
+  # --- SUPEREST principal: consume el venv desde el volumen ---
+  superset:
+    image: apache/superset:latest
+    container_name: superset
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      clickhouse-init: { condition: service_completed_successfully }
+      superset-venv-setup: { condition: service_completed_successfully }
+    networks: [etl_net]
+    volumes:
+      - superset_home:/app/superset_home
+      - superset_venv:/app/.venv
+    environment:
+      SUPERSET_ENV: "production"
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY}"
+      SUPERSET_ADMIN: "${SUPERSET_ADMIN:-admin}"
+      SUPERSET_PASSWORD: "${SUPERSET_PASSWORD:-Admin123!}"
+      PATH: "/app/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8088/health || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 60
+    ports:
+      - "8088:8088"
+
+    # (opcional) si quieres que siempre arranque como usuario normal:
+    # user: "superset"
+
+  # ---------- Ejecuta al iniciar Superset ----------
+  superset-init:
+    image: apache/superset:latest
+    container_name: superset-init
+    depends_on:
+      superset: { condition: service_healthy }
+    networks: [etl_net]
+    user: "1000:1000"
+    entrypoint: ["/bin/bash","-lc"]
+    command: |
+      set -euo pipefail;
+      superset db upgrade;
+      (superset fab create-admin
+        --username "${SUPERSET_ADMIN:-admin}"
+        --firstname Admin
+        --lastname User
+        --email admin@local
+        --password "${SUPERSET_PASSWORD:-Admin123!}" || true);
+      superset init;
+      echo SUPERSET_INIT_OK
+    restart: "no"
+    environment:
+      SUPERSET_ENV: "production"
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY}"
+      SUPERSET_ADMIN: "${SUPERSET_ADMIN:-admin}"
+      SUPERSET_PASSWORD: "${SUPERSET_PASSWORD:-Admin123!}"
+      PATH: "/app/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
+    volumes:
+      - superset_home:/app/superset_home
+      - superset_venv:/app/.venv
+
+
+  # ---------- Aprovisionador de Superset ----------
+  provision-superset:
+    image: python:3.11-slim
+    container_name: provision-superset
+    depends_on:
+      superset-init: { condition: service_started }
+    networks: [etl_net]
+    volumes:
+      - ./:/app
+    working_dir: /app
+    environment:
+      SUPERSET_URL: "${SUPERSET_URL:-http://superset:8088}"
+      SUPERSET_ADMIN: "${SUPERSET_ADMIN:-admin}"
+      SUPERSET_PASSWORD: "${SUPERSET_PASSWORD:-Admin123!}"
+      CLICKHOUSE_DATABASE: "${CLICKHOUSE_DATABASE:-fgeo_analytics}"
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
+      CLICKHOUSE_HOST: "${CLICKHOUSE_HOST:-clickhouse}"
+      CLICKHOUSE_PORT: "${CLICKHOUSE_PORT:-8123}"
+      PROVISION_SAMPLE: "${PROVISION_SAMPLE:-true}"
+    entrypoint: ["/bin/sh", "-lc"]
+    command: |
+      pip install --no-cache-dir requests tenacity &&
+      python tools/provision_superset.py
+
+  superset-datasources:
+    image: apache/superset:latest
+    container_name: superset-datasources
+    depends_on:
+      superset: { condition: service_started }
+      superset-venv-setup: { condition: service_completed_successfully }
+      configurator: { condition: service_completed_successfully }
+    networks: [etl_net]
+    volumes:
+      - superset_home:/app/superset_home
+      - superset_venv:/app/.venv
+      - ./.generated:/generated:ro
+    entrypoint: ["/bin/bash","-lc"]
+    command: |
+      set -euo pipefail;
+      export PATH="/app/.venv/bin:${PATH}";
+      bash /generated/superset_create_dbs.sh || true;
+      echo DATASOURCES_OK
+    restart: "no"
+
+  superset-bootstrap:
+    image: apache/superset:latest
+    container_name: superset-bootstrap
+    depends_on:
+      superset: { condition: service_healthy }
+      superset-venv-setup: { condition: service_completed_successfully }
+      clickhouse-init: { condition: service_completed_successfully }
+      superset-init: { condition: service_completed_successfully }
+      configurator: { condition: service_completed_successfully }
+    networks: [etl_net]
+    user: "1000:1000"             # mantener como el usuario de superset (evita permisos raros en /app/superset_home)
+    environment:
+      SUPERSET_ENV: "production"
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY}"
+      SUPERSET_ADMIN: "${SUPERSET_ADMIN:-admin}"
+      SUPERSET_PASSWORD: "${SUPERSET_PASSWORD:-Admin123!}"
+      PATH: "/app/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
+    volumes:
+      - superset_home:/app/superset_home
+      - superset_venv:/app/.venv
+      - ./superset_bootstrap:/bootstrap:ro
+    entrypoint: ["/bin/bash","-lc"]
+    command: |
+      set -euo pipefail;
+      chmod +x /bootstrap/run.sh;
+      /bootstrap/run.sh
+      cp -n /bootstrap/clickhouse_db.yaml /app/superset_home/clickhouse_db.yaml || true;
+      superset import-datasources -p /app/superset_home/clickhouse_db.yaml -u "${SUPERSET_ADMIN:-admin}";
+      echo BOOTSTRAP_OK
+    restart: "no"
+
+  ingestor:
+    image: python:3.11-slim
+    container_name: ingestor
+    working_dir: /app
+    networks: [etl_net]
+    env_file: [".env"]
+    environment:
+    # Fuerza que el runner use la cuenta de escritura
+      CLICKHOUSE_HTTP_HOST: clickhouse
+      CLICKHOUSE_HTTP_PORT: "8123"
+      CLICKHOUSE_DATABASE: fgeo_analytics
+      CLICKHOUSE_USER: etl
+      CLICKHOUSE_PASSWORD: "Et1Ingest!"
+    volumes:
+      - ./:/app
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    # Ejecuta pip + ingestor en una sola línea; sin 'command:' aparte
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - >
+        python -m pip install --no-cache-dir -q -r tools/requirements.txt &&
+        python tools/ingest_runner.py --ch-database "${CH_DB:-fgeo_analytics}" &&
+        echo INGEST_DONE
+    restart: "no"
+

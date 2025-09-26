@@ -1,0 +1,24 @@
+# --- Utilidades base ---
+python-dotenv==1.0.1
+requests==2.32.3
+pytz==2025.2
+
+# --- SQL / ORMs ---
+SQLAlchemy>=2.0,<2.1      # rama 1.4 para máxima compatibilidad
+PyMySQL>=1.1          # MySQL/MariaDB
+psycopg2-binary==2.9.9    # PostgreSQL (wheel precompilado)
+
+# --- ClickHouse ---
+clickhouse-connect>=0.7
+
+# --- Kafka ---
+kafka-python==2.0.2
+
+# --- (Opcional) si parseas YAML en algún script ---
+# pyyaml==6.0.2
+
+# --- (Opcional) si procesas dataframes ---
+pandas>=2.0
+# pyarrow==16.1.0
+
+tqdm==4.66.5
