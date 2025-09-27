@@ -18,11 +18,7 @@ services:
   configurator:
     image: python:3.11-slim
     container_name: configurator
-<<<<<<< HEAD
     profiles: ["bulk","cdc"]
-=======
-    profiles: ["cdc"]
->>>>>>> 3a5104d (Ajustes .env y docker-compose (perfiles/healthchecks))
     working_dir: /app
     env_file:
       - .env
