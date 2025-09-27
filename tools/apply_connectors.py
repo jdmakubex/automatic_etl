@@ -1,4 +1,5 @@
 # tools/apply_connectors.py
+<<<<<<< HEAD
 import os, json, time, sys
 from pathlib import Path
 import requests
@@ -76,6 +77,78 @@ def main():
             print(f"[WARN] Conexión incompleta, se omite: {db}")
             continue
         name, cfg = make_mysql_cfg(db)
+=======
+import os, json, time
+import requests
+
+CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
+DB_CONNS = os.getenv("DB_CONNECTIONS", "[]")
+
+def ensure_connector(name: str, config: dict):
+    r = requests.get(f"{CONNECT_URL}/connectors/{name}")
+    if r.status_code == 200:
+        # update (PUT /config)
+        resp = requests.put(f"{CONNECT_URL}/connectors/{name}/config", json=config)
+        resp.raise_for_status()
+        print(f"[CONNECT] Updated: {name}")
+    elif r.status_code == 404:
+        # create (POST)
+        payload = {"name": name, "config": config}
+        resp = requests.post(f"{CONNECT_URL}/connectors", json=payload)
+        resp.raise_for_status()
+        print(f"[CONNECT] Created: {name}")
+    else:
+        print(r.text)
+        r.raise_for_status()
+
+def make_mysql_config(db):
+    host = db["host"]; port = db.get("port", 3306)
+    user = db["user"]; password = db["pass"]; database = db["db"]
+    # topic prefix por DB (evita colisiones)
+    topic_prefix = f"dbserver_{database}"
+    # nombre del conector
+    name = f"debezium-mysql-{database}"
+
+    cfg = {
+      "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max": "1",
+      "database.hostname": host,
+      "database.port": str(port),
+      "database.user": user,
+      "database.password": password,
+      "database.server.id": str(5400 + int(time.time()) % 500),
+      "database.server.name": topic_prefix,
+      "database.include.list": database,
+      "include.schema.changes": "false",
+
+      # MySQL 5.5 compat
+      "snapshot.mode": "initial",  # o "schema_only" si carga inicial la haces en Bulk
+      "database.history.kafka.bootstrap.servers": "kafka-1:9092",
+      "database.history.kafka.topic": f"{topic_prefix}.history",
+
+      # Sanitización
+      "topic.creation.default.replication.factor": "1",
+      "topic.creation.default.partitions": "3",
+      "topic.creation.default.cleanup.policy": "delete",
+      "decimal.handling.mode": "string",
+
+      # Converters JSON sin schema
+      "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "key.converter.schemas.enable": "false",
+      "value.converter.schemas.enable": "false",
+    }
+    return name, cfg
+
+def main():
+    conns = json.loads(DB_CONNS)
+    mysql_conns = [c for c in conns if c.get("type") == "mysql"]
+    if not mysql_conns:
+        print("[WARN] No hay conexiones MySQL en DB_CONNECTIONS")
+        return
+    for db in mysql_conns:
+        name, cfg = make_mysql_config(db)
+>>>>>>> 3a5104d (Ajustes .env y docker-compose (perfiles/healthchecks))
         ensure_connector(name, cfg)
 
 if __name__ == "__main__":
