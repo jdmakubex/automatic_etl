@@ -197,33 +197,30 @@ services:
 
   # ---------- Kafka Connect ----------
   connect:
-    image: confluentinc/cp-kafka-connect:7.5.0
-    container_name: connect
-    hostname: connect
-    depends_on:
-      kafka-1: { condition: service_started }
-      kafka-2: { condition: service_started }
-      kafka-3: { condition: service_started }
-      environment:
-      - BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092,kafka-3:9092
-      - GROUP_ID=1
-      - CONFIG_STORAGE_TOPIC=connect_configs
-      - OFFSET_STORAGE_TOPIC=connect_offsets
-      - STATUS_STORAGE_TOPIC=connect_statuses
-      - KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
-      - VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
-      - KEY_CONVERTER_SCHEMAS_ENABLE=false
-      - VALUE_CONVERTER_SCHEMAS_ENABLE=false
-      - REST_ADVERTISED_HOST_NAME=connect
-      - REST_PORT=8083
-    networks: [etl_net]
-    ports:
-      - "8083:8083"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8083/"]
-      interval: 10s
-      timeout: 3s
-      retries: 20
+  image: debezium/connect:2.7
+  container_name: connect
+  depends_on:
+    kafka-1: { condition: service_started }
+    kafka-2: { condition: service_started }
+    kafka-3: { condition: service_started }
+  ports:
+    - "8083:8083"
+  environment:
+    - BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092,kafka-3:9092
+    - GROUP_ID=1
+    - CONFIG_STORAGE_TOPIC=connect_configs
+    - OFFSET_STORAGE_TOPIC=connect_offsets
+    - STATUS_STORAGE_TOPIC=connect_statuses
+    - KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+    - VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+    - KEY_CONVERTER_SCHEMAS_ENABLE=false
+    - VALUE_CONVERTER_SCHEMAS_ENABLE=false
+    - REST_ADVERTISED_HOST_NAME=connect
+    - REST_PORT=8083
+  networks: [etl_net]
+  restart: unless-stopped
+  profiles: ["cdc"]
+
 
   # ---------- ClickHouse ----------
 
