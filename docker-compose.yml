@@ -131,12 +131,12 @@ services:
 
         # ⬇️ Unifica con el resto del cluster
         KAFKA_CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
-      networks: [etl_net]
-      volumes:
-        - broker1_data:/var/lib/kafka/data
-      ports:
-        # ⬇️ Exporta el puerto del listener HOST (19092 -> 19092)
-        - "19092:19092"
+        networks: [etl_net]
+        volumes:
+          - broker1_data:/var/lib/kafka/data
+        ports:
+          # ⬇️ Exporta el puerto del listener HOST (19092 -> 19092)
+          - "19092:19092"
       restart: unless-stopped
 
 
@@ -171,11 +171,11 @@ services:
 
         # Unificado con controllers/brokers
         KAFKA_CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
-      networks: [etl_net]
-      volumes:
-        - broker2_data:/var/lib/kafka/data
-      ports:
-        - "19093:19093"
+        networks: [etl_net]
+        volumes:
+          - broker2_data:/var/lib/kafka/data
+        ports:
+          - "19093:19093"
       restart: unless-stopped
 
 
@@ -210,11 +210,11 @@ services:
 
         # Unificado con controllers/brokers
         KAFKA_CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
-      networks: [etl_net]
-      volumes:
-        - broker3_data:/var/lib/kafka/data
-      ports:
-        - "19094:19094"
+        networks: [etl_net]
+        volumes:
+          - broker3_data:/var/lib/kafka/data
+        ports:
+          - "19094:19094"
       restart: unless-stopped
 
 
