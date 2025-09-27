@@ -204,25 +204,18 @@ services:
       kafka-1: { condition: service_started }
       kafka-2: { condition: service_started }
       kafka-3: { condition: service_started }
-    environment:
-      CONNECT_BOOTSTRAP_SERVERS: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
-      CONNECT_LISTENERS: "http://0.0.0.0:8083"
-      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
-      CONNECT_REST_PORT: 8083
-      CONNECT_GROUP_ID: "connect-cluster"
-      CONNECT_CONFIG_STORAGE_TOPIC: "_connect-configs"
-      CONNECT_OFFSET_STORAGE_TOPIC: "_connect-offsets"
-      CONNECT_STATUS_STORAGE_TOPIC: "_connect-status"
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 3
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 3
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 3
-      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
-      CONNECT_LOG4J_LOGGERS: "org.reflections=ERROR"
-      ENABLE_DEBEZIUM_SCRIPTING: "true"
+      environment:
+      - BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092,kafka-3:9092
+      - GROUP_ID=1
+      - CONFIG_STORAGE_TOPIC=connect_configs
+      - OFFSET_STORAGE_TOPIC=connect_offsets
+      - STATUS_STORAGE_TOPIC=connect_statuses
+      - KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - KEY_CONVERTER_SCHEMAS_ENABLE=false
+      - VALUE_CONVERTER_SCHEMAS_ENABLE=false
+      - REST_ADVERTISED_HOST_NAME=connect
+      - REST_PORT=8083
     networks: [etl_net]
     ports:
       - "8083:8083"
