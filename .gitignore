@@ -1,5 +1,18 @@
+<<<<<<< HEAD
 generated/**
 !generated/.gitkeep
 .env
 .env.*
 !.env.example
+=======
+# Ignora todo dentro de generated/
+generated/**
+
+# Excepto el marcador para mantener la carpeta en el repo
+!generated/.gitkeep
+# Ignora todo dentro de generated/
+generated/**
+
+# Excepto el marcador para mantener la carpeta en el repo
+!generated/.gitkeep
+>>>>>>> 571627b (first commit)

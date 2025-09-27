@@ -15,13 +15,17 @@ volumes:
 
 
 services:
-
   configurator:
     image: python:3.11-slim
     container_name: configurator
     working_dir: /app
     env_file:
       - .env
+    environment:
+      - CONNECT_URL=http://connect:8083
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fgeo_analytics}
+      - DB_CONNECTIONS=${DB_CONNECTIONS}
     networks: [etl_net]
     volumes:
       - ./:/app
@@ -30,10 +34,18 @@ services:
     entrypoint: ["bash","-lc"]
     command: |
       set -euo pipefail;
-      python -m pip install --no-cache-dir -q python-dotenv;
+      python -m pip install --no-cache-dir -q python-dotenv requests clickhouse-connect SQLAlchemy PyMySQL;
       python -c "import sys; print(sys.version)";
       python tools/render_from_env.py
-    restart: "no"
+    restart: unless-stopped
+    profiles: ["bulk","cdc"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  
+
+
 
   # ---------- KRaft Controllers ----------
   kafka-controller-1:
