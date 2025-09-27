@@ -18,6 +18,7 @@ services:
   configurator:
     image: python:3.11-slim
     container_name: configurator
+    profiles: ["bulk","cdc"]
     working_dir: /app
     env_file:
       - .env
@@ -38,7 +39,6 @@ services:
       python -c "import sys; print(sys.version)";
       python tools/render_from_env.py
     restart: unless-stopped
-    profiles: ["bulk","cdc"]
     depends_on:
       clickhouse:
         condition: service_healthy

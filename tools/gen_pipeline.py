@@ -1,8 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import os, json, pathlib
-from dotenv import load_dotenv
+import os, json, re
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+try:
+    from dotenv import load_dotenv; load_dotenv(ROOT / ".env")
+except Exception:
+    pass
 import pymysql
+
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "generated"

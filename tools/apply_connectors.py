@@ -1,7 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import os, json, pathlib, requests, time
-from dotenv import load_dotenv
+# tools/apply_connectors.py  (encabezado robusto)
+import pathlib
+import os, json, time
+from pathlib import Path  
+import requests
+
+ROOT = Path(__file__).resolve().parent.parent  # /app
+
+# Carga .env si existe y si python-dotenv está instalado; si no, sigue con env del contenedor
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except Exception:
+    pass
+
+CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
+DB_CONNS = json.loads(os.getenv("DB_CONNECTIONS", "[]"))
+
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GEN = ROOT / "generated"
@@ -45,4 +62,10 @@ def main():
     print(f"Conectores aplicados: {ok}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        print("[OK] Conectores Debezium aplicados")
+        raise SystemExit(0)
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        raise SystemExit(1)
