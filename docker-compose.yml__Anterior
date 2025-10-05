@@ -215,3 +215,4 @@ services:
         - tools/cdc_bootstrap.py
 
 
+  restart: "no"
