@@ -17,6 +17,22 @@ import argparse
 import subprocess
 from pathlib import Path
 
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger(__name__)
+
+# Clases de error
+class RecoverableError(Exception):
+    """Error recuperable - se puede reintentar"""
+    pass
+
+class FatalError(Exception):
+    """Error fatal - requiere intervención manual"""
+    pass
+
 # -----------------------------------
 # Utils
 # -----------------------------------
@@ -24,9 +40,12 @@ def sh(cmd: list[str] | str, **kwargs) -> subprocess.CompletedProcess:
     """Run shell command with check=True by default."""
     if "check" not in kwargs:
         kwargs["check"] = True
-    if isinstance(cmd, list):
-        return subprocess.run(cmd, **kwargs)
-    return subprocess.run(cmd, shell=True, **kwargs)
+    try:
+        if isinstance(cmd, list):
+            return subprocess.run(cmd, **kwargs)
+        return subprocess.run(cmd, shell=True, **kwargs)
+    except subprocess.CalledProcessError as e:
+        raise RecoverableError(f"Comando falló con código {e.returncode}: {cmd}")
 
 def ensure_deps(skip_install: bool):
     """Instala dependencias mínimas si faltan (o salta si se indica)."""
@@ -35,30 +54,45 @@ def ensure_deps(skip_install: bool):
     pkgs = ["python-dotenv", "requests", "clickhouse-connect", "SQLAlchemy", "PyMySQL"]
     try:
         import requests  # type: ignore # noqa: F401
+        log.info("[BOOT] Dependencias ya instaladas")
     except Exception:
-        logging.info("[BOOT] Instalando dependencias de Python…")
-        sh([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-q", *pkgs])
+        log.info("[BOOT] Instalando dependencias de Python…")
+        try:
+            sh([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-q", *pkgs])
+            log.info("[BOOT] ✓ Dependencias instaladas correctamente")
+        except RecoverableError as e:
+            log.error(f"Error instalando dependencias: {e}")
+            raise FatalError("No se pudieron instalar dependencias Python. Verifica conectividad y pip.")
 
 def env_get(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 def apply_connectors():
-    logging.info("[CDC] Aplicando conectores Debezium…")
-    sh([sys.executable, "tools/apply_connectors.py"])
+    log.info("[CDC] Aplicando conectores Debezium…")
+    try:
+        sh([sys.executable, "tools/apply_connectors.py"])
+        log.info("[CDC] ✓ Conectores aplicados correctamente")
+    except RecoverableError as e:
+        log.warning(f"[CDC] Error aplicando conectores (continuando): {e}")
 
 def generate_pipeline():
-    logging.info("[CDC] Generando objetos ClickHouse (Kafka Engine + MVs)…")
+    log.info("[CDC] Generando objetos ClickHouse (Kafka Engine + MVs)…")
     gen_dir = Path("generated")
-    if gen_dir.exists():
-        # Borra SOLO el contenido de generated/, no la carpeta
-        for p in gen_dir.glob("*"):
-            if p.is_dir():
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                p.unlink(missing_ok=True)
-    else:
-        gen_dir.mkdir(parents=True, exist_ok=True)
-    sh([sys.executable, "tools/gen_pipeline.py"])
+    try:
+        if gen_dir.exists():
+            # Borra SOLO el contenido de generated/, no la carpeta
+            for p in gen_dir.glob("*"):
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)
+        else:
+            gen_dir.mkdir(parents=True, exist_ok=True)
+        
+        sh([sys.executable, "tools/gen_pipeline.py"])
+        log.info("[CDC] ✓ Pipeline generado correctamente")
+    except RecoverableError as e:
+        raise RecoverableError(f"Error generando pipeline: {e}")
 
 def apply_sql_via_http(sql_path: Path, ch_host: str, ch_port: str, ch_db: str, ch_user: str, ch_pass: str):
     import requests  # type: ignore
@@ -176,17 +210,20 @@ echo "APPLIED=$APPLIED"
 # Main
 # -----------------------------------
 def main():
+    log.info("=== Bootstrap CDC iniciado ===")
+    
     parser = argparse.ArgumentParser(description="Bootstrap CDC end-to-end.")
     parser.add_argument("--skip-install", action="store_true", help="No instalar dependencias de Python.")
     parser.add_argument("--only-sql", action="store_true", help="Saltar conectores/gen_pipeline; solo aplicar SQL/wrappers.")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    errors = []
 
-    ensure_deps(args.skip_install)
+    try:
+        ensure_deps(args.skip_install)
+    except FatalError as e:
+        log.error(f"Error fatal en dependencias: {e}")
+        errors.append(("fatal", "dependencias", str(e)))
 
     # Variables ClickHouse (HTTP)
     ch_host = env_get("CLICKHOUSE_HTTP_HOST", "clickhouse")
@@ -196,19 +233,62 @@ def main():
     ch_pass = os.environ.get("CH_PASSWORD", "Et1Ingest!")
 
     if not args.only_sql:
-        apply_connectors()
-        generate_pipeline()
+        try:
+            apply_connectors()
+        except RecoverableError as e:
+            log.warning(f"Error recuperable en conectores: {e}")
+            errors.append(("recoverable", "conectores", str(e)))
+        except FatalError as e:
+            log.error(f"Error fatal en conectores: {e}")
+            errors.append(("fatal", "conectores", str(e)))
+        
+        try:
+            generate_pipeline()
+        except RecoverableError as e:
+            log.warning(f"Error recuperable en pipeline: {e}")
+            errors.append(("recoverable", "pipeline", str(e)))
+        except FatalError as e:
+            log.error(f"Error fatal en pipeline: {e}")
+            errors.append(("fatal", "pipeline", str(e)))
 
-    logging.info("[CDC] Aplicando SQL a ClickHouse vía HTTP…")
-    applied = apply_sql_files(ch_host, ch_port, ch_db, ch_user, ch_pass)
+    log.info("[CDC] Aplicando SQL a ClickHouse vía HTTP…")
+    try:
+        applied = apply_sql_files(ch_host, ch_port, ch_db, ch_user, ch_pass)
 
-    if applied == 0:
-        logging.info("[CDC] No hay .sql directos; ejecutando wrappers .sh con proxy HTTP…")
-        applied = run_wrappers_with_proxy(ch_host, ch_port, ch_db, ch_user, ch_pass)
+        if applied == 0:
+            log.info("[CDC] No hay .sql directos; ejecutando wrappers .sh con proxy HTTP…")
+            applied = run_wrappers_with_proxy(ch_host, ch_port, ch_db, ch_user, ch_pass)
 
-    logging.info("[CDC] SQL aplicados (contando .sql o .sh): %d", applied)
-    logging.info("[CDC] Bootstrap OK")
-    return 0
+        log.info("[CDC] SQL aplicados (contando .sql o .sh): %d", applied)
+    except Exception as e:
+        log.error(f"Error aplicando SQL: {e}", exc_info=True)
+        errors.append(("error", "sql", str(e)))
+
+    log.info("")
+    log.info("=== Bootstrap CDC completado ===")
+    
+    if errors:
+        log.warning(f"⚠ Se encontraron {len(errors)} error(es):")
+        for error_type, component, msg in errors:
+            log.warning(f"  [{error_type.upper()}] {component}: {msg}")
+        
+        fatal_errors = [e for e in errors if e[0] == "fatal"]
+        if fatal_errors:
+            log.error("Errores fatales encontrados. Consulta docs/ERROR_RECOVERY.md")
+            return 2
+        else:
+            log.warning("Errores recuperables encontrados")
+            return 1
+    else:
+        log.info("[CDC] ✓ Bootstrap OK")
+        return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        log.warning("Proceso interrumpido por el usuario")
+        sys.exit(130)
+    except Exception as e:
+        log.error(f"Error inesperado: {e}", exc_info=True)
+        sys.exit(3)

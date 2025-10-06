@@ -103,14 +103,64 @@ def resolve_source_url(args, env):
 
 
 # ---------------------------------
-# Logging
+# Logging con soporte JSON
 # ---------------------------------
+import json as json_module
+from datetime import datetime as dt_module
+
+class JSONFormatter(logging.Formatter):
+    """Formateador de logs en JSON estructurado"""
+    def format(self, record):
+        log_data = {
+            "timestamp": dt_module.utcnow().isoformat() + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno
+        }
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+        
+        # Agregar contexto adicional si está disponible
+        if hasattr(record, 'context'):
+            log_data["context"] = record.context
+        
+        return json_module.dumps(log_data, ensure_ascii=False)
+
+
+# Configurar logging según formato especificado
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text").lower()
+
+if LOG_FORMAT == "json":
+    handler = logging.StreamHandler()
+    handler.setFormatter(JSONFormatter())
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        handlers=[handler]
+    )
+else:
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------
+# Clases de error personalizadas
+# ---------------------------------
+class RecoverableError(Exception):
+    """Error recuperable - se puede reintentar o continuar"""
+    pass
+
+
+class FatalError(Exception):
+    """Error fatal - requiere intervención manual"""
+    pass
 
 
 # ---------------------------------
@@ -388,14 +438,36 @@ def get_clickhouse_client() -> clickhouse_connect.driver.Client:
     log.info(
         f"ClickHouse -> host={ch_host} port={ch_port} user={ch_user} secure={ch_secure}"
     )
-    return clickhouse_connect.get_client(
-        host=ch_host, port=ch_port, username=ch_user, password=ch_pass, secure=ch_secure
-    )
+    try:
+        client = clickhouse_connect.get_client(
+            host=ch_host, port=ch_port, username=ch_user, password=ch_pass, secure=ch_secure
+        )
+        # Verificar conexión con query simple
+        client.query("SELECT 1")
+        return client
+    except Exception as e:
+        raise FatalError(
+            f"No se pudo conectar a ClickHouse en {ch_host}:{ch_port}: {e}. "
+            f"Verifica que el servicio esté corriendo y accesible. "
+            f"Consulta docs/ERROR_RECOVERY.md para soluciones."
+        )
 
 
 def get_source_engine(src_url: str) -> Engine:
     log.info(f"Fuente default -> {src_url.replace('//', '//***@')}")
-    return create_engine(src_url, pool_recycle=3600, pool_pre_ping=True)
+    try:
+        engine = create_engine(src_url, pool_recycle=3600, pool_pre_ping=True)
+        # Verificar conexión
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return engine
+    except Exception as e:
+        raise FatalError(
+            f"No se pudo conectar a la base de datos fuente: {e}. "
+            f"Verifica credenciales y conectividad. "
+            f"URL (ofuscada): {src_url.replace('//', '//***@')}. "
+            f"Consulta docs/ERROR_RECOVERY.md para soluciones."
+        )
 
 
 # ---------------------------------
@@ -657,42 +729,59 @@ def ingest_one_table(
         return 0
 
     # Asegurar tabla destino (ajusta engine ORDER BY según dedup_mode)
-    created = ensure_ch_table(
-        client,
-        ch_database,
-        ch_table,
-        src_engine,
-        schema,
-        table,
-        dedup_mode=dedup_mode,
-        unique_key=unique_key,
-        version_col=version_col,
-    )
-    if not created:
-        return 0
+    try:
+        created = ensure_ch_table(
+            client,
+            ch_database,
+            ch_table,
+            src_engine,
+            schema,
+            table,
+            dedup_mode=dedup_mode,
+            unique_key=unique_key,
+            version_col=version_col,
+        )
+        if not created:
+            return 0
+    except Exception as e:
+        raise RecoverableError(f"No se pudo crear tabla {ch_database}.{ch_table}: {e}")
 
     # TRUNCATE si se pidió recarga total
     if truncate_before_load:
-        client.query(f"TRUNCATE TABLE {ch_database}.{ch_table}")
+        try:
+            client.query(f"TRUNCATE TABLE {ch_database}.{ch_table}")
+        except Exception as e:
+            log.warning(f"No se pudo truncar tabla {ch_database}.{ch_table}: {e}")
 
     # Carga
     inserted_total = 0
     try:
         log.info(f"Leyendo {schema}.{table} (chunksize={chunksize} limit={'∞' if not limit else limit})")
-        for chunk in read_table_in_chunks(src_engine, schema, table, chunksize, limit):
-            n = insert_df(
-                client,
-                ch_database,
-                ch_table,
-                chunk,
-                unique_key=unique_key,
-                drop_dupes_in_chunk=True,
-            )
-            inserted_total += n
-            log.info(f"Insertados {n} filas en {ch_database}.{ch_table} (acumulado={inserted_total})")
+        for chunk_num, chunk in enumerate(read_table_in_chunks(src_engine, schema, table, chunksize, limit), start=1):
+            try:
+                n = insert_df(
+                    client,
+                    ch_database,
+                    ch_table,
+                    chunk,
+                    unique_key=unique_key,
+                    drop_dupes_in_chunk=True,
+                )
+                inserted_total += n
+                log.info(
+                    f"Chunk #{chunk_num}: insertados {n} filas en {ch_database}.{ch_table} (acumulado={inserted_total})"
+                )
+            except Exception as e:
+                # Error en chunk específico - registrar pero continuar
+                log.error(f"Error insertando chunk #{chunk_num}: {e}", exc_info=True)
+                raise RecoverableError(f"Error en chunk #{chunk_num}, pero se continuará con siguientes")
+    except RecoverableError:
+        # Propagar error recuperable
+        raise
     except Exception as e:
+        # Error general de lectura/procesamiento
         log.error(f"Error ingiriendo {schema}.{table}: {e}", exc_info=True)
-        return inserted_total
+        raise RecoverableError(f"Error general ingiriendo {schema}.{table}: {e}")
 
     # Post-procesos según modo
     if dedup_mode == "staging":
@@ -713,6 +802,7 @@ def ingest_one_table(
                 log.info(f"Deduplicación por swap completada para {ch_database}.{ch_table}.")
             except Exception as e:
                 log.error(f"Error deduplicando por staging/swap en {ch_database}.{ch_table}: {e}", exc_info=True)
+                raise RecoverableError(f"Error en deduplicación: {e}")
 
     if dedup_mode == "replacing" and final_optimize:
         try:
@@ -796,15 +886,23 @@ def main():
     source_url = resolve_source_url(args, os.environ)
     if not source_url:
         log.error("Debes especificar --source-url o una conexión válida vía SOURCE_URL o DB_CONNECTIONS (legado).")
+        log.error("Consulta docs/ERROR_RECOVERY.md para más información.")
         sys.exit(1)
 
     unique_key = args.unique_key or None
     version_col = args.version_col or None
 
     # Conexiones
-    client = get_clickhouse_client()
-    src_engine = get_source_engine(source_url)  # ✅ usar la URL resuelta
-    ensure_ch_database(client, args.ch_database)
+    try:
+        client = get_clickhouse_client()
+        src_engine = get_source_engine(source_url)  # ✅ usar la URL resuelta
+        ensure_ch_database(client, args.ch_database)
+    except FatalError as e:
+        log.error(f"Error fatal inicializando conexiones: {e}")
+        sys.exit(2)
+    except Exception as e:
+        log.error(f"Error inesperado inicializando conexiones: {e}", exc_info=True)
+        sys.exit(3)
 
     # Descubrir tablas
     all_pairs = list_tables(src_engine, args.schemas)  # [(schema, table)]
@@ -812,6 +910,8 @@ def main():
     exclude_set = set(args.exclude) if args.exclude else set()
 
     total_rows = 0
+    failed_tables = []
+    
     for (schema, table) in all_pairs:
         full = f"{schema}.{table}"
         if include_set is not None and full not in include_set:
@@ -821,24 +921,49 @@ def main():
 
         ch_table = f"{args.ch_prefix.format(source=args.source_name)}{schema}__{table}".replace(".", "__")
 
-        rows = ingest_one_table(
-            client=client,
-            src_engine=src_engine,
-            schema=schema,
-            table=table,
-            ch_database=args.ch_database,
-            ch_table=ch_table,
-            chunksize=args.chunksize,
-            limit=(args.limit if args.limit > 0 else None),
-            truncate_before_load=args.truncate_before_load,
-            dedup_mode=args.dedup,
-            unique_key=unique_key,
-            version_col=version_col,
-            final_optimize=args.final_optimize,
-        )
-        total_rows += rows
+        try:
+            rows = ingest_one_table(
+                client=client,
+                src_engine=src_engine,
+                schema=schema,
+                table=table,
+                ch_database=args.ch_database,
+                ch_table=ch_table,
+                chunksize=args.chunksize,
+                limit=(args.limit if args.limit > 0 else None),
+                truncate_before_load=args.truncate_before_load,
+                dedup_mode=args.dedup,
+                unique_key=unique_key,
+                version_col=version_col,
+                final_optimize=args.final_optimize,
+            )
+            total_rows += rows
+        except RecoverableError as e:
+            # Error recuperable - registrar y continuar con siguiente tabla
+            log.warning(f"Error recuperable en tabla {full}: {e}")
+            failed_tables.append({"table": full, "error": str(e), "type": "recoverable"})
+        except FatalError as e:
+            # Error fatal - abortar
+            log.error(f"Error fatal en tabla {full}: {e}")
+            failed_tables.append({"table": full, "error": str(e), "type": "fatal"})
+            log.error("Abortando ingesta debido a error fatal.")
+            sys.exit(2)
+        except Exception as e:
+            # Error inesperado - registrar y continuar
+            log.error(f"Error inesperado en tabla {full}: {e}", exc_info=True)
+            failed_tables.append({"table": full, "error": str(e), "type": "unexpected"})
 
     log.info(f"== INGESTA TERMINADA == Filas insertadas totales: {total_rows}")
+    
+    if failed_tables:
+        log.warning(f"⚠ {len(failed_tables)} tabla(s) con errores:")
+        for ft in failed_tables:
+            log.warning(f"  - {ft['table']} ({ft['type']}): {ft['error']}")
+        log.warning("Consulta docs/ERROR_RECOVERY.md para soluciones.")
+        sys.exit(1)
+    else:
+        log.info("✓ Todas las tablas se ingirieron exitosamente")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
