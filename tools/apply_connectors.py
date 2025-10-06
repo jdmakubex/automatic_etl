@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 import os, json, time, sys, zlib
 from pathlib import Path
-import requests
+import requests  # type: ignore
 
 ROOT = Path(__file__).resolve().parent.parent
 # Carga .env si existe (opcional)
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # type: ignore
     load_dotenv(ROOT / ".env")
 except Exception:
     pass

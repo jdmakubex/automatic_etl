@@ -34,7 +34,7 @@ def ensure_deps(skip_install: bool):
         return
     pkgs = ["python-dotenv", "requests", "clickhouse-connect", "SQLAlchemy", "PyMySQL"]
     try:
-        import requests  # noqa: F401
+        import requests  # type: ignore # noqa: F401
     except Exception:
         logging.info("[BOOT] Instalando dependencias de Python…")
         sh([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-q", *pkgs])
@@ -61,7 +61,7 @@ def generate_pipeline():
     sh([sys.executable, "tools/gen_pipeline.py"])
 
 def apply_sql_via_http(sql_path: Path, ch_host: str, ch_port: str, ch_db: str, ch_user: str, ch_pass: str):
-    import requests
+    import requests  # type: ignore
     with open(sql_path, "rb") as fh:
         r = requests.post(
             f"http://{ch_host}:{ch_port}/",

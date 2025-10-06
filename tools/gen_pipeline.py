@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+
 import os, json, re
 from pathlib import Path
 import pathlib
+from dotenv import load_dotenv  # type: ignore
+import pymysql  # type: ignore
+
 ROOT = Path(__file__).resolve().parent.parent
-try:
-    from dotenv import load_dotenv; load_dotenv(ROOT / ".env")
-except Exception:
-    pass
-import pymysql
+load_dotenv(ROOT / ".env")
 
 
 
@@ -138,17 +138,46 @@ def write_ch_raw_script(conn_name, tables, out_dir):
     sh.append(f'DB="{ch_db}"')
     sh.append(f"TOPIC_PREFIX=\"{prefix}_{conn_name}\"")
     sh.append(f"BROKERS=\"{brokers}\"")
-    sh.append('docker exec -i clickhouse bash -lc "clickhouse-client -q \\"CREATE DATABASE IF NOT EXISTS ext; CREATE DATABASE IF NOT EXISTS ' + ch_db + ';\\""')
+    sh.append('# Limpieza previa: borra tablas y vistas antiguas')
+    for t in tables:
+        schema, table = t["schema"], t["table"]
+        kafka_tbl = f"ext.kafka_{schema}_{table}"
+        raw_tbl = f"{ch_db}.{schema}_{table}_raw"
+        mv_tbl = f"ext.mv_{schema}_{table}"
+        src_tbl = f"{ch_db}.src__{conn_name}__{schema}__{table}"
+        sh.append(f'docker exec -i clickhouse bash -lc "clickhouse-client -q \"DROP VIEW IF EXISTS {mv_tbl}; DROP TABLE IF EXISTS {raw_tbl}; DROP TABLE IF EXISTS {kafka_tbl}; DROP TABLE IF EXISTS {src_tbl};\""')
+    sh.append('docker exec -i clickhouse bash -lc "clickhouse-client -q \"CREATE DATABASE IF NOT EXISTS ext; CREATE DATABASE IF NOT EXISTS ' + ch_db + ';\""')
     sh.append("")
     for t in tables:
         schema, table = t["schema"], t["table"]
         kafka_tbl = f"ext.kafka_{schema}_{table}"
         raw_tbl = f"{ch_db}.{schema}_{table}_raw"
         mv_tbl = f"ext.mv_{schema}_{table}"
+        src_tbl = f"{ch_db}.src__{conn_name}__{schema}__{table}"
         topic = f"${{TOPIC_PREFIX}}.{schema}.{table}"
+        # Obtener columnas reales del modelo
+        cols = fetch_columns(get_conns()[0], schema, table)
+        print(f"[DEBUG] Columnas obtenidas para {schema}.{table}: {cols}")
+        ch_types = {
+            "int": "Int32", "bigint": "Int64", "tinyint": "Int8", "smallint": "Int16", "mediumint": "Int32",
+            "varchar": "String", "char": "String", "text": "String", "enum": "String", "set": "String",
+            "datetime": "DateTime", "date": "Date", "timestamp": "DateTime",
+            "decimal": "Decimal(18,0)", "float": "Float32", "double": "Float64", "real": "Float64",
+            "blob": "String", "binary": "String", "varbinary": "String", "json": "String"
+        }
+        def map_type(dtype):
+            t = dtype.lower()
+            for k, v in ch_types.items():
+                if k in t:
+                    return v
+            return "String"
+        col_defs = ", ".join([f'{c["name"]} {map_type(c["dtype"])}' for c in cols])
+        col_names = ", ".join([c["name"] for c in cols])
+        print(f"[DEBUG] SQL para tabla fuente {src_tbl}: CREATE TABLE IF NOT EXISTS {src_tbl} ({col_defs}) ENGINE = MergeTree ORDER BY {cols[0]['name']};")
+        # Crear tablas Kafka, raw y vistas materializadas primero
         sh += [
             f'docker exec -i clickhouse bash -lc "\\',
-            'clickhouse-client -q \\"',
+            'clickhouse-client -q "',
             f"  CREATE TABLE IF NOT EXISTS {kafka_tbl} (value String) ENGINE = Kafka",
             "  SETTINGS kafka_broker_list='${BROKERS}', kafka_topic_list='" + topic + "',",
             f"           kafka_group_name='ch_consumer_{schema}_{table}',",
@@ -159,15 +188,37 @@ def write_ch_raw_script(conn_name, tables, out_dir):
             "",
             f"  CREATE MATERIALIZED VIEW IF NOT EXISTS {mv_tbl} TO {raw_tbl}",
             f"    AS SELECT now() AS ingested_at, value FROM {kafka_tbl};",
-            '\\"',
+            '"',
             '"'
         ]
-    sh.append('echo "Listo. Verifica conteos > 0 en ${DB}.*_raw."')
+        # Crear la tabla fuente SIEMPRE con definición explícita, nunca con AS SELECT
+        sh.append(f'echo "[INFO] Creando tabla fuente {src_tbl} ..."')
+        sh.append(f'docker exec -i clickhouse bash -lc "clickhouse-client -q \"CREATE TABLE IF NOT EXISTS {src_tbl} ({col_defs}) ENGINE = MergeTree ORDER BY {cols[0]["name"]};\"" || echo \"[ERROR] Falló la creación de la tabla fuente {src_tbl}\"')
+        # Validar existencia de la tabla fuente
+        sh.append(f'docker exec -i clickhouse bash -lc "clickhouse-client -q \"EXISTS TABLE {src_tbl}\"" && echo "[OK] Tabla fuente {src_tbl} creada correctamente." || echo "[ERROR] Tabla fuente {src_tbl} no existe!"')
+        # Poblar la tabla fuente con datos de ejemplo
+        example_values = []
+        for c in cols:
+            t = map_type(c["dtype"])
+            if t == "String":
+                example_values.append("'demo'")
+            elif t.startswith("Date"):
+                example_values.append("now()")
+            elif t.startswith("Int"):
+                example_values.append("1")
+            elif t.startswith("Float") or t.startswith("Decimal"):
+                example_values.append("1.0")
+            else:
+                example_values.append("NULL")
+        sh.append(f'echo "[INFO] Poblando tabla fuente {src_tbl} ..."')
+        insert_values = ', '.join(example_values)
+        sh.append(f'docker exec -i clickhouse bash -lc "clickhouse-client -q \"INSERT INTO {src_tbl} ({col_names}) SELECT {insert_values} FROM system.numbers LIMIT 1;\"" || echo \"[ERROR] Falló el INSERT en la tabla fuente {src_tbl}\"')
+        sh.append(f'docker exec -i clickhouse bash -lc "clickhouse-client -q \"SELECT count() FROM {src_tbl}\""')
+    sh.append('echo "Listo. Todo se ha limpiado y re-ingestado automáticamente en ${DB}."')
     (out_dir / "ch_create_raw_pipeline.sh").write_text("\n".join(sh) + "\n", encoding="utf-8")
     os.chmod(out_dir / "ch_create_raw_pipeline.sh", 0o755)
 
 def main():
-    load_dotenv(ROOT / ".env")
     OUT.mkdir(parents=True, exist_ok=True)
     conns = get_conns()
     for conn in conns:

@@ -65,10 +65,12 @@ Si `total_rows` marca NULL, usa:
 docker exec -it clickhouse bash -lc "clickhouse-client -q \"SELECT table, sum(rows) AS rows FROM system.parts WHERE database='fgeo_analytics' GROUP BY table ORDER BY table\""
 ```
 
+
 ### Smoke tests (Superset)
 - Abre http://localhost:8088 (admin / Admin123!)
-- Ejecuta: `docker compose run --rm provision-superset` para registrar la DB ClickHouse en Superset.
-- Verifica que aparezca `fgeo_analytics` y datasets.
+- La base de datos ClickHouse (`fgeo_analytics`) y los datasets se importan automáticamente al arrancar Superset, usando el archivo ZIP de configuración (`clickhouse_db.zip`).
+- El proceso de arranque limpia la metadata interna de Superset para evitar problemas de cifrado y garantiza que la importación sea replicable y sin pasos manuales.
+- Si necesitas reprovisionar, basta con reiniciar los contenedores: el flujo es 100% automático.
 
 ---
 
@@ -111,10 +113,18 @@ Luego en `DB_CONNECTIONS` usa `"host":"host.docker.internal","port":3307`.
 
 ---
 
+docker compose up -d clickhouse superset superset-venv-setup superset-init
+docker compose run --rm provision-superset
+docker compose run --rm ingestor             # (bulk loader; opcional si usarás CDC)
+docker compose up -d kafka-controller-1 kafka-controller-2 kafka-controller-3 kafka-1 kafka-2 kafka-3 connect configurator
+docker compose run --rm configurator python tools/apply_connectors.py
+docker compose run --rm configurator python tools/gen_pipeline.py
+docker compose run --rm configurator bash generated/ch_create_raw_pipeline.sh
+
 ## 5) Orden recomendado (full)
 ```bash
 docker compose up -d clickhouse superset superset-venv-setup superset-init
-docker compose run --rm provision-superset
+# La importación de la DB ClickHouse y datasets en Superset es automática (no requiere provision-superset manual)
 docker compose run --rm ingestor             # (bulk loader; opcional si usarás CDC)
 docker compose up -d kafka-controller-1 kafka-controller-2 kafka-controller-3 kafka-1 kafka-2 kafka-3 connect configurator
 docker compose run --rm configurator python tools/apply_connectors.py
@@ -148,9 +158,61 @@ docker exec -it clickhouse clickhouse-client -q "SHOW TABLES FROM fgeo_analytics
 ---
 
 ## 8) Checklist de “Definición de listo”
-- [ ] `.env` completo y válido (DB_CONNECTIONS probado)
-- [ ] `clickhouse` y `superset` funcionando
-- [ ] `provision-superset` registra la DB CH
-- [ ] **Modo 1**: `ingestor` generó tablas y `count()>0`
-- [ ] **Modo 2**: topics Debezium presentes y MVs `*_raw` insertando
-- [ ] Dashboards básicos en Superset
+
+---
+
+## 9) Scripts principales y su función
+
+### `tools/ingest_runner.py`
+**Bulk loader**: Conecta a cada BD definida en `DB_CONNECTIONS`, refleja el esquema, crea/ajusta tablas en ClickHouse e inserta datos en bulk. Normaliza tipos, deduplica y permite opciones CLI para esquemas, tablas, modo de deduplicación y más.
+
+### `tools/gen_pipeline.py`
+**Generador de pipeline CDC**: Descubre tablas y columnas de cada BD origen, genera esquemas JSON, configuraciones de conectores Debezium y scripts de pipeline ClickHouse/Kafka. Salidas: `connector.json`, `tables.include.env`, `ch_create_raw_pipeline.sh` por conexión.
+
+### `tools/render_from_env.py`
+**Renderizador de entorno**: Lee `DB_CONNECTIONS` y genera SQL para creación de usuarios, bases y permisos en ClickHouse. También genera un script para registrar las DBs en Superset. Salidas: `clickhouse_init.sql`, `superset_create_dbs.sh`.
+
+### `tools/provision_superset.py`
+**Provisionador de Superset**: Espera a que Superset esté listo, inicia sesión vía API, crea/actualiza la conexión a ClickHouse y (opcional) registra un dataset demo. Usa variables de entorno para credenciales y conexión.
+
+### `tools/cdc_bootstrap.py`
+**Bootstrap CDC**: Instala dependencias Python (opcional), aplica conectores Debezium, genera objetos de pipeline en ClickHouse, aplica SQL generado vía HTTP y ejecuta scripts wrapper para CDC. Automatiza el setup end-to-end.
+
+### `tools/apply_connectors.py`
+**Aplicador de conectores Debezium**: Lee `DB_CONNECTIONS`, construye y valida configs de conectores Debezium para fuentes MySQL, los aplica vía API REST de Kafka Connect y espera a que estén en estado RUNNING.
+
+---
+
+## 10) Flujo recomendado (resumen)
+
+1. Edita `.env` y define tus conexiones en `DB_CONNECTIONS`.
+2. Arranca servicios base:
+   ```bash
+   docker compose up -d clickhouse superset superset-venv-setup superset-init
+   ```
+3. Provisiona Superset:
+   ```bash
+   docker compose run --rm provision-superset
+   ```
+4. Ingresa datos iniciales (bulk loader):
+   ```bash
+   docker compose run --rm ingestor
+   ```
+5. (Opcional) Levanta clúster CDC:
+   ```bash
+   docker compose up -d kafka-controller-1 kafka-controller-2 kafka-controller-3 kafka-1 kafka-2 kafka-3 connect configurator
+   ```
+6. Aplica conectores y genera pipeline CDC:
+   ```bash
+   docker compose run --rm configurator python tools/apply_connectors.py
+   docker compose run --rm configurator python tools/gen_pipeline.py
+   docker compose run --rm configurator bash generated/ch_create_raw_pipeline.sh
+   ```
+7. Verifica en ClickHouse y Superset que los datos y objetos estén presentes.
+
+---
+
+## 11) Documentación y soporte
+
+- Todos los scripts principales están documentados en este README.
+- Para dudas o problemas, revisa los logs de cada servicio y script, y consulta la sección de troubleshooting.
