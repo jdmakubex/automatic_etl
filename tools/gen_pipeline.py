@@ -219,31 +219,41 @@ def write_ch_raw_script(conn_name, tables, out_dir):
     os.chmod(out_dir / "ch_create_raw_pipeline.sh", 0o755)
 
 def main():
+    print("[ETL][START] Proceso principal iniciado.")
     OUT.mkdir(parents=True, exist_ok=True)
     conns = get_conns()
+    print(f"[ETL] Conexiones detectadas: {len(conns)}")
     for conn in conns:
         conn_name = conn["name"]
+        print(f"[ETL][{conn_name}] Iniciando procesamiento de conexión...")
         out_dir = OUT / conn_name
         schemas_dir = out_dir / "schemas"
         out_dir.mkdir(parents=True, exist_ok=True)
         schemas_dir.mkdir(parents=True, exist_ok=True)
 
+        print(f"[ETL][{conn_name}] Extrayendo tablas...")
         tables = fetch_tables(conn)
+        print(f"[ETL][{conn_name}] Tablas encontradas: {len(tables)}")
         include = ",".join([f"{t['schema']}.{t['table']}" for t in tables])
         (out_dir / "tables.include.env").write_text(
             f"DBZ_MYSQL_TABLE_INCLUDE_LIST={include}\n", encoding="utf-8"
         )
+        print(f"[ETL][{conn_name}] Generando payload de conector...")
         payload = connector_payload(conn_name, conn, include)
         (out_dir / "connector.json").write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        print(f"[ETL][{conn_name}] Generando script de creación de tablas en ClickHouse...")
         write_ch_raw_script(conn_name, tables, out_dir)
 
         for t in tables:
+            print(f"[ETL][{conn_name}] Generando schema JSON para {t['schema']}.{t['table']}...")
             cols = fetch_columns(conn, t["schema"], t["table"])
             write_json_schema(t["schema"], t["table"], cols, schemas_dir)
 
-        print(f"✔ [{conn_name}] {len(tables)} tablas -> {out_dir}")
+        print(f"[ETL][{conn_name}] Proceso de conexión finalizado. {len(tables)} tablas -> {out_dir}")
+    print("[ETL][END] Proceso principal finalizado.")
 
 if __name__ == "__main__":
+    print("[ETL][MAIN] Script ejecutándose como principal.")
     main()

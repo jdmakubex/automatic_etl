@@ -24,7 +24,13 @@ REQUIREMENTS = [
 def run(cmd, msg=None):
     if msg:
         print(f"[SETUP] {msg}")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Falló el comando: {' '.join(cmd)}")
+        print(f"[ERROR] Código de salida: {e.returncode}")
+        print(f"[ERROR] Mensaje: {e}")
+        sys.exit(1)
 
 
 def main():
@@ -36,6 +42,9 @@ def main():
     # Crear entorno virtual si no existe
     if not os.path.exists(VENV_PATH):
         run([sys.executable, "-m", "venv", VENV_PATH], "Creando entorno virtual en /app/superset_home/.venv")
+    if not os.path.exists(os.path.join(VENV_PATH, "bin", "activate")):
+        print("[ERROR] El entorno virtual no se creó correctamente. No se encontró el archivo activate.")
+        sys.exit(1)
 
     # Instalar/actualizar pip en el entorno virtual
     pip_path = os.path.join(VENV_PATH, "bin", "pip")

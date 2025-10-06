@@ -1,4 +1,12 @@
 FROM python:3.11-slim
 WORKDIR /app
+# No copiar la carpeta tools ni sus archivos aquí, se montarán por volumen en docker-compose
 COPY tools/requirements.txt tools/requirements.txt
-RUN python -m pip install --no-cache-dir -r tools/requirements.txt
+RUN python -m pip install --no-cache-dir -r tools/requirements.txt && \
+    python -m pip install --no-cache-dir clickhouse-sqlalchemy==0.2.0
+# Instala utilidades estándar de Linux
+RUN apt-get update && apt-get install -y \
+    file \
+    coreutils \
+    bash \
+    && rm -rf /var/lib/apt/lists/*
