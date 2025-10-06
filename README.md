@@ -153,7 +153,81 @@ docker logs -f etl_prod-ingestor-1
 
 # Revisar tablas creadas por ingestor
 docker exec -it clickhouse clickhouse-client -q "SHOW TABLES FROM fgeo_analytics"
+
+# === NUEVOS: Validaciones automáticas ===
+
+# Validar ClickHouse (tablas, datos, esquema)
+docker compose run --rm etl-tools python tools/validate_clickhouse.py
+
+# Validar Superset (configuración, bases de datos, datasets)
+docker compose run --rm configurator python tools/validate_superset.py
+
+# Validar variables de entorno y dependencias
+docker compose run --rm etl-tools python tools/validators.py
+
+# Ejecutar validaciones con logs JSON
+LOG_FORMAT=json docker compose run --rm etl-tools python tools/validate_clickhouse.py
 ```
+
+---
+
+## 7.1) Características de robustez del pipeline
+
+### Healthchecks
+Todos los servicios tienen healthchecks configurados:
+- ClickHouse: Verifica endpoint `/ping`
+- Superset: Verifica endpoint `/health`
+- Kafka: Verifica listado de topics
+- Connect: Verifica endpoint REST `/connectors`
+- Otros servicios: Verifican disponibilidad de Python y directorio de herramientas
+
+### Validación de entorno
+Antes de ejecutar scripts, se validan:
+- Variables de entorno críticas (DB_CONNECTIONS, CLICKHOUSE_DATABASE, etc.)
+- Dependencias Python requeridas
+- Conectividad a servicios (ClickHouse, Kafka Connect)
+- Formato de configuración JSON
+
+### Manejo de errores
+Los scripts diferencian entre:
+- **Errores recuperables**: Se registran y el proceso continúa (ej: una tabla falla pero otras continúan)
+- **Errores fatales**: Se aborta el proceso inmediatamente (ej: credenciales inválidas, servicio no disponible)
+- **Errores inesperados**: Se registran con stack trace completo
+
+### Logging estructurado
+Soporta dos formatos de logging:
+```bash
+# Formato texto (default)
+python tools/ingest_runner.py
+
+# Formato JSON estructurado
+LOG_FORMAT=json python tools/ingest_runner.py
+```
+
+Logs JSON incluyen:
+- timestamp ISO 8601 UTC
+- nivel (INFO, WARNING, ERROR)
+- módulo y función
+- mensaje
+- contexto adicional
+- stack trace en errores
+
+### Validaciones automáticas
+Scripts de validación para verificar el estado del sistema:
+- `validate_clickhouse.py`: Valida base de datos, tablas, datos y esquemas
+- `validate_superset.py`: Valida health, autenticación, bases de datos y datasets
+- `validators.py`: Valida configuración de entorno
+
+Generan reportes JSON guardados en `logs/`:
+- `logs/clickhouse_validation.json`
+- `logs/superset_validation.json`
+
+### Documentación de errores
+Ver `docs/ERROR_RECOVERY.md` para:
+- Errores comunes y soluciones
+- Procedimientos de recuperación
+- Diagnóstico con logs
+- Comandos de troubleshooting
 
 ---
 
@@ -183,36 +257,42 @@ docker exec -it clickhouse clickhouse-client -q "SHOW TABLES FROM fgeo_analytics
 
 ---
 
-## 10) Flujo recomendado (resumen)
+## 11) Flujo recomendado (resumen)
 
 1. Edita `.env` y define tus conexiones en `DB_CONNECTIONS`.
 2. Arranca servicios base:
    ```bash
    docker compose up -d clickhouse superset superset-venv-setup superset-init
    ```
-3. Provisiona Superset:
+3. **NUEVO:** Valida configuración:
    ```bash
-   docker compose run --rm provision-superset
+   docker compose run --rm etl-tools python tools/validators.py
    ```
 4. Ingresa datos iniciales (bulk loader):
    ```bash
    docker compose run --rm ingestor
    ```
-5. (Opcional) Levanta clúster CDC:
+5. **NUEVO:** Valida ingesta:
+   ```bash
+   docker compose run --rm etl-tools python tools/validate_clickhouse.py
+   docker compose run --rm configurator python tools/validate_superset.py
+   ```
+6. (Opcional) Levanta clúster CDC:
    ```bash
    docker compose up -d kafka-controller-1 kafka-controller-2 kafka-controller-3 kafka-1 kafka-2 kafka-3 connect configurator
    ```
-6. Aplica conectores y genera pipeline CDC:
+7. Aplica conectores y genera pipeline CDC:
    ```bash
    docker compose run --rm configurator python tools/apply_connectors.py
    docker compose run --rm configurator python tools/gen_pipeline.py
    docker compose run --rm configurator bash generated/ch_create_raw_pipeline.sh
    ```
-7. Verifica en ClickHouse y Superset que los datos y objetos estén presentes.
+8. Verifica en ClickHouse y Superset que los datos y objetos estén presentes.
+9. **NUEVO:** En caso de errores, consulta `docs/ERROR_RECOVERY.md`
 
 ---
 
-## 11) Documentación y soporte
+## 12) Documentación y soporte
 
 - Todos los scripts principales están documentados en este README.
 - Para dudas o problemas, revisa los logs de cada servicio y script, y consulta la sección de troubleshooting.

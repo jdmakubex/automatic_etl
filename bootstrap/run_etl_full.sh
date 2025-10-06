@@ -4,38 +4,103 @@ set -euo pipefail
 # Script maestro para lanzar todo el pipeline ETL y validar cada paso
 # Mensajes y comprobaciones en español
 
+# Función para logging con timestamp y nivel
+log_info() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $*" | tee -a logs/etl_full.log
+}
 
+log_error() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [ERROR] $*" | tee -a logs/etl_full.log >&2
+}
+
+log_warning() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [WARNING] $*" | tee -a logs/etl_full.log
+}
+
+# Función para manejo de errores fatales
+handle_fatal_error() {
+    log_error "Error fatal: $1"
+    log_error "Consulta docs/ERROR_RECOVERY.md para soluciones"
+    exit 1
+}
+
+# Función para manejo de errores recuperables
+handle_recoverable_error() {
+    log_warning "Error recuperable: $1"
+    log_warning "Intentando continuar..."
+    return 0
+}
+
+# Crear directorio de logs si no existe
+mkdir -p logs
+
+log_info "=== Iniciando pipeline ETL completo ==="
+
+# Validar variables de entorno críticas antes de comenzar
+log_info "Validando variables de entorno..."
+if [ -z "${DB_CONNECTIONS:-}" ]; then
+  handle_fatal_error "La variable DB_CONNECTIONS no está definida en .env. Abortando."
+fi
+log_info "✓ DB_CONNECTIONS definida"
+
+# Validar que existe archivo .env
+if [ ! -f .env ]; then
+  log_warning "Archivo .env no encontrado. Usando valores por defecto."
+else
+  log_info "✓ Archivo .env encontrado"
+fi
 
 
 # 1. Limpieza y preparación
-printf "\n[ETL] Limpiando contenedores, volúmenes y red...\n" | tee -a logs/etl_full.log
-docker compose down -v | tee -a logs/etl_full.log || true
+log_info "Limpiando contenedores, volúmenes y red..."
+docker compose down -v 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "docker compose down falló"
 # Elimina todos los contenedores activos (forzado)
-docker ps -aq | xargs -r docker rm -f | tee -a logs/etl_full.log || true
-docker network rm etl_prod_etl_net | tee -a logs/etl_full.log || true
-docker network create etl_prod_etl_net | tee -a logs/etl_full.log || true
-docker volume prune -f | tee -a logs/etl_full.log || true
+docker ps -aq | xargs -r docker rm -f 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "No hay contenedores para eliminar"
+docker network rm etl_prod_etl_net 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "Red no existe"
+docker network create etl_prod_etl_net 2>&1 | tee -a logs/etl_full.log || handle_fatal_error "No se pudo crear la red"
+docker volume prune -f 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "No hay volúmenes para limpiar"
+log_info "✓ Limpieza completada"
 
 # 2. Construcción de imagen
-echo "[ETL] Construyendo imagen pipeline-gen con dependencias actualizadas..." | tee -a logs/etl_full.log
-docker compose build pipeline-gen | tee -a logs/etl_full.log
+log_info "Construyendo imagen pipeline-gen con dependencias actualizadas..."
+if ! docker compose build pipeline-gen 2>&1 | tee -a logs/etl_full.log; then
+  handle_fatal_error "No se pudo construir la imagen pipeline-gen"
+fi
+log_info "✓ Imagen construida exitosamente"
 
 # 3. Lanzar servicios base
-printf "\n[ETL] Lanzando servicios principales...\n" | tee -a logs/etl_full.log
-docker compose up -d clickhouse superset superset-venv-setup superset-init kafka connect | tee -a logs/etl_full.log
+log_info "Lanzando servicios principales..."
+if ! docker compose up -d clickhouse superset superset-venv-setup superset-init kafka connect 2>&1 | tee -a logs/etl_full.log; then
+  handle_fatal_error "No se pudieron iniciar los servicios principales"
+fi
+log_info "Esperando 10 segundos para que los servicios inicien..."
 sleep 10
+log_info "✓ Servicios principales iniciados"
 
 # 4. Comprobar estado de servicios
-printf "\n[ETL] Comprobando estado de servicios...\n" | tee -a logs/etl_full.log
+log_info "Comprobando estado de servicios..."
 
 # Validar salud de servicios principales
-printf "\n[ETL] Verificando salud de servicios principales...\n" | tee -a logs/etl_full.log
+log_info "Verificando salud de servicios principales..."
+UNHEALTHY_SERVICES=()
 for SVC in clickhouse superset kafka connect pipeline-gen etl-tools configurator cdc-bootstrap cdc superset-venv-setup; do
   STATUS=$(docker inspect --format='{{.State.Health.Status}}' $SVC 2>/dev/null || echo "no-healthcheck")
-  echo "[ETL] Servicio $SVC: Estado de salud = $STATUS" | tee -a logs/etl_full.log
+  if [ "$STATUS" = "unhealthy" ]; then
+    UNHEALTHY_SERVICES+=("$SVC")
+    log_error "Servicio $SVC: Estado de salud = $STATUS"
+  else
+    log_info "Servicio $SVC: Estado de salud = $STATUS"
+  fi
 done
 
+# Si hay servicios no saludables, advertir pero continuar
+if [ ${#UNHEALTHY_SERVICES[@]} -gt 0 ]; then
+  log_warning "Servicios no saludables detectados: ${UNHEALTHY_SERVICES[*]}"
+  log_warning "Continuando de todas formas..."
+fi
+
 docker ps --format 'table {{.Names}}\t{{.Status}}' | tee -a logs/etl_full.log
+log_info "✓ Verificación de servicios completada"
 
 # 2. Lanzar servicios base
 printf "\n[ETL] Lanzando servicios principales...\n"
@@ -139,9 +204,37 @@ else
 fi
 
 # Exportar y listar datasets de Superset
-printf "\n[ETL] Exportando datasets de Superset...\n" | tee -a logs/etl_full.log
-docker exec superset superset export-datasources -f /app/superset_home/exported_dbs.zip | tee -a logs/etl_full.log
-docker cp superset:/app/superset_home/exported_dbs.zip ./superset_bootstrap/exported_dbs.zip | tee -a logs/etl_full.log
-unzip -l ./superset_bootstrap/exported_dbs.zip | tee -a logs/etl_full.log
+log_info "Exportando datasets de Superset..."
+if docker exec superset superset export-datasources -f /app/superset_home/exported_dbs.zip 2>&1 | tee -a logs/etl_full.log; then
+  docker cp superset:/app/superset_home/exported_dbs.zip ./superset_bootstrap/exported_dbs.zip 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "No se pudo copiar archivo exportado"
+  unzip -l ./superset_bootstrap/exported_dbs.zip 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "No se pudo listar contenido del archivo"
+  log_info "✓ Datasets exportados correctamente"
+else
+  handle_recoverable_error "No se pudo exportar datasets de Superset"
+fi
 
-printf "\n[ETL] Proceso completo. Revisa los resultados arriba y en logs/etl_full.log.\n" | tee -a logs/etl_full.log
+# Ejecutar validaciones automáticas
+log_info ""
+log_info "=== Ejecutando validaciones automáticas ==="
+
+# Validar ClickHouse
+log_info "Validando ClickHouse..."
+if docker compose run --rm etl-tools python tools/validate_clickhouse.py 2>&1 | tee -a logs/etl_full.log; then
+  log_info "✓ Validación de ClickHouse exitosa"
+else
+  log_warning "⚠ Validación de ClickHouse falló (ver logs/clickhouse_validation.json)"
+fi
+
+# Validar Superset
+log_info "Validando Superset..."
+if docker compose run --rm configurator python tools/validate_superset.py 2>&1 | tee -a logs/etl_full.log; then
+  log_info "✓ Validación de Superset exitosa"
+else
+  log_warning "⚠ Validación de Superset falló (ver logs/superset_validation.json)"
+fi
+
+log_info ""
+log_info "=== Proceso completo ==="
+log_info "Revisa los resultados arriba y en logs/etl_full.log"
+log_info "Para solucionar problemas, consulta: docs/ERROR_RECOVERY.md"
+log_info ""
