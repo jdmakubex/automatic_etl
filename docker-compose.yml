@@ -31,9 +31,8 @@ services:
       - etl_net
     volumes:
       - ./tools:/app/tools
+      - ./logs:/app/logs
     user: "1000:1000"
-    entrypoint: ["bash","-lc"]
-    command: "tail -f /dev/null"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -63,6 +62,7 @@ services:
       - etl_net
     volumes:
       - ./tools:/app/tools
+      - ./logs:/app/logs
     user: "1000:1000"
     entrypoint: ["bash","-lc"]
     command: >

@@ -10,6 +10,7 @@ import json
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime
+import unittest
 
 # Configurar logging JSON
 class JSONFormatter(logging.Formatter):
@@ -312,32 +313,52 @@ def main():
     log.info(f"Mínimo de tablas: {min_tables}")
     log.info(f"Validar datos: {validate_data}")
     
-    # Ejecutar validaciones
-    results = run_all_validations(database, min_tables, validate_data)
-    
+    try:
+        # Ejecutar validaciones
+        results = run_all_validations(database, min_tables, validate_data)
+    except Exception as e:
+        log.error(f"[ROBUSTEZ] Error inesperado en main: {e}")
+        results = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "component": "clickhouse",
+            "database": database,
+            "tests": [],
+            "summary": {
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "errors": 1
+            },
+            "error": f"Error inesperado en main: {e}"
+        }
     # Imprimir resultados
-    if use_json:
-        print(json.dumps(results, indent=2, ensure_ascii=False))
-    else:
-        print("\n=== Resultados de Validación ===")
-        print(f"Total de pruebas: {results['summary']['total']}")
-        print(f"✓ Pasadas: {results['summary']['passed']}")
-        print(f"✗ Fallidas: {results['summary']['failed']}")
-        print(f"⚠ Errores: {results['summary']['errors']}")
-        
-        if results['summary']['failed'] > 0 or results['summary']['errors'] > 0:
-            print("\nDetalles de fallos:")
-            for test in results['tests']:
-                if test['status'] in ['FAIL', 'ERROR']:
-                    print(f"  - {test['test']}: {test.get('details', {}).get('error', 'Sin detalles')}")
-    
-    # Guardar resultados en archivo
+    try:
+        if use_json:
+            print(json.dumps(results, indent=2, ensure_ascii=False))
+        else:
+            print("\n=== Resultados de Validación ===")
+            print(f"Total de pruebas: {results['summary']['total']}")
+            print(f"✓ Pasadas: {results['summary']['passed']}")
+            print(f"✗ Fallidas: {results['summary']['failed']}")
+            print(f"⚠ Errores: {results['summary']['errors']}")
+            if results['summary']['failed'] > 0 or results['summary']['errors'] > 0:
+                print("\nDetalles de fallos:")
+                for test in results.get('tests', []):
+                    if test.get('status') in ['FAIL', 'ERROR']:
+                        print(f"  - {test.get('test')}: {test.get('details', {}).get('error', 'Sin detalles')}")
+                if results.get('error'):
+                    print(f"  - error global: {results['error']}")
+    except Exception as e:
+        log.error(f"[ROBUSTEZ] Error imprimiendo resultados: {e}")
+    # Guardar resultados en archivo, aunque haya error
     output_file = os.getenv("OUTPUT_FILE", "logs/clickhouse_validation.json")
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "w") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-    log.info(f"Resultados guardados en: {output_file}")
-    
+    try:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        log.info(f"Resultados guardados en: {output_file}")
+    except Exception as e:
+        log.error(f"[ROBUSTEZ] No se pudo guardar el archivo de resultados: {e}")
     # Exit code según resultados
     if results['summary']['errors'] > 0:
         log.error("Validación completada con errores")
@@ -351,10 +372,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logging.error(f"Error fatal: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(3)
+    main()
