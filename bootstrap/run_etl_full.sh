@@ -50,6 +50,19 @@ else
   log_info "✓ Archivo .env encontrado"
 fi
 
+# NUEVO: Ejecutar validaciones completas si están habilitadas
+ENABLE_VALIDATION=${ENABLE_VALIDATION:-true}
+if [ "$ENABLE_VALIDATION" = "true" ]; then
+  log_info "Ejecutando validaciones de entorno y dependencias..."
+  if docker compose run --rm etl-tools python tools/validators.py 2>&1 | tee -a logs/etl_full.log; then
+    log_info "✓ Validaciones de entorno pasaron"
+  else
+    handle_recoverable_error "Algunas validaciones fallaron, pero continuando..."
+  fi
+else
+  log_info "⊝ Validaciones deshabilitadas (ENABLE_VALIDATION=false)"
+fi
+
 
 # 1. Limpieza y preparación
 log_info "Limpiando contenedores, volúmenes y red..."
@@ -101,6 +114,32 @@ fi
 
 docker ps --format 'table {{.Names}}\t{{.Status}}' | tee -a logs/etl_full.log
 log_info "✓ Verificación de servicios completada"
+
+# NUEVO: Verificar dependencias y esperar a que servicios estén listos
+ENABLE_DEPENDENCY_VERIFICATION=${ENABLE_DEPENDENCY_VERIFICATION:-true}
+if [ "$ENABLE_DEPENDENCY_VERIFICATION" = "true" ]; then
+  log_info "Verificando que servicios estén listos..."
+  if docker compose run --rm etl-tools python tools/verify_dependencies.py 2>&1 | tee -a logs/etl_full.log; then
+    log_info "✓ Todos los servicios están listos"
+  else
+    handle_recoverable_error "Algunos servicios no están completamente listos, pero continuando..."
+  fi
+else
+  log_info "⊝ Verificación de dependencias deshabilitada (ENABLE_DEPENDENCY_VERIFICATION=false)"
+fi
+
+# NUEVO: Probar permisos antes de iniciar ingesta
+ENABLE_PERMISSION_TESTS=${ENABLE_PERMISSION_TESTS:-false}
+if [ "$ENABLE_PERMISSION_TESTS" = "true" ]; then
+  log_info "Ejecutando pruebas de permisos..."
+  if docker compose run --rm etl-tools python tools/test_permissions.py 2>&1 | tee -a logs/etl_full.log; then
+    log_info "✓ Todas las pruebas de permisos pasaron"
+  else
+    log_warning "⚠ Algunas pruebas de permisos fallaron (puede ser normal si CDC no está configurado)"
+  fi
+else
+  log_info "⊝ Pruebas de permisos deshabilitadas (ENABLE_PERMISSION_TESTS=false)"
+fi
 
 # 2. Lanzar servicios base
 printf "\n[ETL] Lanzando servicios principales...\n"

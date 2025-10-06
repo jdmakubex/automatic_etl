@@ -12,7 +12,8 @@ import json
 # Agregar directorio de tools al path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))
 
-from test_permissions import save_test_results
+# Import with different name to avoid circular import
+import test_permissions as perm_module
 
 
 class TestPermissions(unittest.TestCase):
@@ -32,7 +33,7 @@ class TestPermissions(unittest.TestCase):
         if os.path.exists(output_file):
             os.remove(output_file)
         
-        save_test_results(results, output_file)
+        perm_module.save_test_results(results, output_file)
         
         # Verificar que el archivo existe
         self.assertTrue(os.path.exists(output_file))
