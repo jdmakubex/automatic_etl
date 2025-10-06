@@ -217,10 +217,73 @@ Scripts de validación para verificar el estado del sistema:
 - `validate_clickhouse.py`: Valida base de datos, tablas, datos y esquemas
 - `validate_superset.py`: Valida health, autenticación, bases de datos y datasets
 - `validators.py`: Valida configuración de entorno
+- `test_permissions.py`: **NUEVO** - Prueba permisos en ClickHouse, Kafka y MySQL
+- `verify_dependencies.py`: **NUEVO** - Verifica dependencias y secuencialidad
 
 Generan reportes JSON guardados en `logs/`:
 - `logs/clickhouse_validation.json`
 - `logs/superset_validation.json`
+- `logs/permission_tests.json` - **NUEVO**
+- `logs/dependency_verification.json` - **NUEVO**
+
+### Pruebas de permisos
+Valida que los usuarios tengan permisos correctos:
+```bash
+# Probar permisos en todas las tecnologías
+docker compose run --rm etl-tools python tools/test_permissions.py
+
+# Deshabilitar pruebas de permisos
+ENABLE_PERMISSION_TESTS=false docker compose run --rm etl-tools python tools/test_permissions.py
+```
+
+Verifica:
+- ClickHouse: CREATE DATABASE, CREATE TABLE, INSERT, SELECT, DROP
+- Kafka Connect: Listado de conectores y plugins
+- MySQL/Debezium: REPLICATION SLAVE, REPLICATION CLIENT, SELECT, binlog habilitado
+
+### Verificación de dependencias
+Valida la secuencia correcta de inicio:
+```bash
+# Verificar que todos los servicios estén listos
+docker compose run --rm etl-tools python tools/verify_dependencies.py
+
+# Deshabilitar verificación
+ENABLE_DEPENDENCY_VERIFICATION=false docker compose run --rm etl-tools python tools/verify_dependencies.py
+```
+
+Asegura que:
+1. ClickHouse esté listo antes de ingesta
+2. Kafka Connect esté listo antes de aplicar conectores
+3. Bases de datos existan antes de crear tablas
+4. Dependencias Python estén instaladas
+
+### Pruebas unitarias
+El proyecto incluye pruebas unitarias para scripts principales:
+```bash
+# Ejecutar todas las pruebas
+python -m unittest discover tests
+
+# Ejecutar prueba específica
+python -m unittest tests.test_validators
+```
+
+Ver `tests/README.md` para más detalles.
+
+### Control por variables de entorno
+Todas las validaciones y logs pueden controlarse con variables de entorno:
+
+**Control de funcionalidad:**
+- `ENABLE_VALIDATION=true|false` - Validaciones generales
+- `ENABLE_PERMISSION_TESTS=true|false` - Pruebas de permisos
+- `ENABLE_DEPENDENCY_VERIFICATION=true|false` - Verificación de dependencias
+- `ENABLE_CDC=true|false` - Componentes CDC
+- `ENABLE_SUPERSET=true|false` - Superset
+
+**Logging:**
+- `LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` - Nivel de logging
+- `LOG_FORMAT=text|json` - Formato de logs
+
+Ver `docs/ENVIRONMENT_VARIABLES.md` para documentación completa.
 
 ### Documentación de errores
 Ver `docs/ERROR_RECOVERY.md` para:
@@ -294,5 +357,92 @@ Ver `docs/ERROR_RECOVERY.md` para:
 
 ## 12) Documentación y soporte
 
-- Todos los scripts principales están documentados en este README.
-- Para dudas o problemas, revisa los logs de cada servicio y script, y consulta la sección de troubleshooting.
+### Documentación Principal
+- **README.md** (este archivo): Guía de inicio rápido y uso general
+- **docs/DEPENDENCIES.md**: Dependencias y orden de ejecución de componentes
+- **docs/ENVIRONMENT_VARIABLES.md**: Guía completa de variables de entorno
+- **docs/ERROR_RECOVERY.md**: Guía de errores comunes y recuperación
+- **docs/ROBUSTNESS_IMPROVEMENTS.md**: Resumen de mejoras de robustez
+
+### Scripts Disponibles
+- **tools/validators.py**: Validación de entorno y dependencias
+- **tools/test_permissions.py**: Pruebas de permisos en tecnologías ETL
+- **tools/verify_dependencies.py**: Verificación de dependencias y secuencialidad
+- **tools/ingest_runner.py**: Ingesta bulk de datos
+- **tools/apply_connectors.py**: Aplicación de conectores Debezium
+- **tools/gen_pipeline.py**: Generación de pipeline CDC
+- **tools/validate_clickhouse.py**: Validación de ClickHouse
+- **tools/validate_superset.py**: Validación de Superset
+
+### Pruebas
+- **tests/**: Directorio con pruebas unitarias
+- Ver `tests/README.md` para ejecutar pruebas
+
+### Flujo de Trabajo Recomendado
+
+1. **Configuración inicial:**
+   ```bash
+   # Copiar y editar archivo de configuración
+   cp .env.example .env
+   nano .env  # Editar DB_CONNECTIONS
+   ```
+
+2. **Validar entorno:**
+   ```bash
+   # Validar configuración
+   docker compose run --rm etl-tools python tools/validators.py
+   
+   # Probar permisos
+   docker compose run --rm etl-tools python tools/test_permissions.py
+   ```
+
+3. **Iniciar servicios:**
+   ```bash
+   # Iniciar servicios base
+   docker compose up -d clickhouse
+   
+   # Verificar dependencias
+   docker compose run --rm etl-tools python tools/verify_dependencies.py
+   ```
+
+4. **Ejecutar ingesta:**
+   ```bash
+   docker compose run --rm etl-tools python tools/ingest_runner.py
+   ```
+
+5. **Validar resultados:**
+   ```bash
+   docker compose run --rm etl-tools python tools/validate_clickhouse.py
+   ```
+
+6. **Consultar logs:**
+   ```bash
+   # Ver logs de validación
+   cat logs/clickhouse_validation.json
+   cat logs/permission_tests.json
+   cat logs/dependency_verification.json
+   ```
+
+### Variables de Control
+
+Controla el comportamiento del pipeline con variables de entorno:
+
+```bash
+# Ejemplo: Pipeline con todas las validaciones
+export ENABLE_VALIDATION=true
+export ENABLE_PERMISSION_TESTS=true
+export ENABLE_DEPENDENCY_VERIFICATION=true
+export LOG_LEVEL=INFO
+export LOG_FORMAT=json
+
+bash bootstrap/run_etl_full.sh
+```
+
+Ver `docs/ENVIRONMENT_VARIABLES.md` para lista completa.
+
+### Soporte y Troubleshooting
+
+- Para errores comunes: `docs/ERROR_RECOVERY.md`
+- Para orden de ejecución: `docs/DEPENDENCIES.md`
+- Para configuración: `docs/ENVIRONMENT_VARIABLES.md`
+- Para dudas o problemas, revisa los logs en `logs/` y consulta la sección de troubleshooting.
