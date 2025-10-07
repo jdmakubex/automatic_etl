@@ -329,7 +329,50 @@ services:
 
 
 
-  # ---------- APLICACIÓN AUTOMÁTICA DE CONECTORES ----------
+  # ---------- ORQUESTADOR AUTOMÁTICO DEL PIPELINE ETL ----------
+  etl-orchestrator:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.pipeline-gen
+    image: etl-tools:latest
+    container_name: etl-orchestrator
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      - CONNECT_URL=http://connect:8083
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fgeo_analytics}
+      - DB_CONNECTIONS=${DB_CONNECTIONS}
+      - MYSQL_HOST=${MYSQL_HOST:-172.21.61.53}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_ADMIN_USER=${MYSQL_ADMIN_USER:-root}
+      - MYSQL_ADMIN_PASSWORD=${MYSQL_ADMIN_PASSWORD:-admin}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-archivos}
+    networks:
+      - etl_net
+    volumes:
+      - ./tools:/app/tools
+      - ./generated:/app/generated
+      - ./logs:/app/logs
+    user: "1000:1000"
+    depends_on:
+      connect:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    command: ["python", "tools/orchestrate_etl_init.py"]
+    restart: no
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/logs/orchestrator.log && echo 'Orchestrator running' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ---------- APLICACIÓN AUTOMÁTICA DE CONECTORES (LEGACY - Mantenido para compatibilidad) ----------
   connector-applier:
     build:
       context: .
@@ -353,3 +396,5 @@ services:
         condition: service_healthy
     command: ["python", "tools/apply_connectors_auto.py"]
     restart: no
+    profiles:
+      - manual  # Solo se ejecuta si se especifica el perfil manual
