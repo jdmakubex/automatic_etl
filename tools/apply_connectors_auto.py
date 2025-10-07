@@ -9,27 +9,11 @@ import time
 import os
 import sys
 import glob
-import logging
-
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-log = logging.getLogger(__name__)
 
 CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
 CONNECTORS_PATH = "generated/default"
 MAX_RETRIES = 30
 RETRY_DELAY = 10
-
-class FatalError(Exception):
-    """Error fatal que termina la ejecución"""
-    pass
-
-class RecoverableError(Exception):
-    """Error recuperable que permite continuar"""
-    pass
 
 def wait_for_connect():
     """Espera a que Connect esté disponible"""
@@ -54,7 +38,7 @@ def get_existing_connectors():
     try:
         response = requests.get(f"{CONNECT_URL}/connectors", timeout=5)
         return response.json() if response.status_code == 200 else []
-    except Exception:
+    except:
         return []
 
 def apply_connector(connector_file):
@@ -92,20 +76,17 @@ def apply_connector(connector_file):
         return False
 
 def main():
-    """Función principal para aplicar conectores automáticamente"""
     print("=== APLICACIÓN AUTOMÁTICA DE CONECTORES DEBEZIUM ===")
     
     # Esperar a que Connect esté disponible
     if not wait_for_connect():
-        log.error("Kafka Connect no está disponible")
         sys.exit(1)
     
     # Buscar archivos de conectores
     connector_files = glob.glob(f"{CONNECTORS_PATH}/*.json")
-    
     if not connector_files:
         print(f"⚠️  No se encontraron archivos de conectores en {CONNECTORS_PATH}")
-        return
+        sys.exit(0)
     
     print(f"Encontrados {len(connector_files)} archivos de conectores")
     
@@ -114,24 +95,25 @@ def main():
     for connector_file in connector_files:
         if apply_connector(connector_file):
             success_count += 1
+        time.sleep(2)  # Pausa entre aplicaciones
     
-    # Resumen
-    total = len(connector_files)
     print(f"\n=== RESUMEN ===")
-    print(f"Conectores aplicados exitosamente: {success_count}/{total}")
+    print(f"Conectores aplicados exitosamente: {success_count}/{len(connector_files)}")
     
-    if success_count == total:
+    # Crear archivo de log para indicar que el proceso terminó
+    try:
+        with open("logs/connectors_applied.log", "w") as f:
+            f.write(f"Conectores aplicados: {success_count}/{len(connector_files)}\n")
+            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except:
+        pass
+    
+    if success_count == len(connector_files):
         print("🎉 TODOS LOS CONECTORES APLICADOS CORRECTAMENTE")
-        sys.exit(0)
+        return 0
     else:
         print("⚠️  ALGUNOS CONECTORES FALLARON")
-        sys.exit(1)
+        return 1
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        log.error(f"Error inesperado: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    sys.exit(main())
