@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/app/logs/cleanup.log'),
+            logging.FileHandler('./logs/cleanup.log'),
         logging.StreamHandler()
     ]
 )

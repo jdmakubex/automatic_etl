@@ -550,11 +550,15 @@ def build_create_table_sql(
     partition_by: Optional[str] = None,
     version_col: Optional[str] = None,
 ) -> str:
+    # Solo usar columnas reales, nunca '_dummy_'
+    if not columns or len(columns) == 0:
+        raise RuntimeError(f"No hay columnas reales para crear la tabla {full_table}")
     cols_sql = ",\n  ".join(f"`{n}` {t}" for n, t in columns)
     engine_sql = engine
     if engine.upper().startswith("REPLACINGMERGETREE") and version_col:
         engine_sql = f"ReplacingMergeTree({version_col})"
-    order_sql = ", ".join(f"`{c}`" for c in (order_by or ["_dummy_"]))
+    # Si no hay order_by, usar la primera columna; nunca '_dummy_'
+    order_sql = ", ".join(f"`{c}`" for c in (order_by if order_by else [columns[0][0]]))
     part_sql = f"\nPARTITION BY {partition_by}" if partition_by else ""
     return f"""
 CREATE TABLE IF NOT EXISTS {full_table}
@@ -720,13 +724,43 @@ def ingest_one_table(
     final_optimize: bool,
 ) -> int:
     log.info(f"== Ingerir {schema}.{table} -> {ch_database}.{ch_table} ==")
+    print(f"\n== Ingerir {schema}.{table} -> {ch_database}.{ch_table} ==")
 
     # Verificar existencia
     if not source_table_exists(src_engine, schema, table):
         log.warning(
             f"Tabla omitida {schema}.{table} → La tabla no existe o no es accesible en el origen (omitida)."
         )
+        print(f"Tabla omitida {schema}.{table} → No existe o no es accesible en el origen.")
         return 0
+
+    # Mostrar estructura de la tabla
+    try:
+        ins = inspect(src_engine)
+        cols_info = ins.get_columns(table, schema=schema)
+        print(f"Estructura de {schema}.{table}:")
+        log.info(f"Estructura de {schema}.{table}:")
+        for col in cols_info:
+            col_str = f"  - {col['name']}: {col['type']} (nullable={col.get('nullable', True)})"
+            print(col_str)
+            log.info(col_str)
+    except Exception as e:
+        log.warning(f"No se pudo obtener estructura de {schema}.{table}: {e}")
+        print(f"No se pudo obtener estructura de {schema}.{table}: {e}")
+
+    # Mostrar muestra de datos
+    try:
+        with src_engine.connect() as conn:
+            result = conn.execute(f"SELECT * FROM `{schema}`.`{table}` LIMIT 5")
+            rows = result.fetchall()
+            print(f"Primeros 5 datos de {schema}.{table}:")
+            log.info(f"Primeros 5 datos de {schema}.{table}:")
+            for row in rows:
+                print(f"  {row}")
+                log.info(f"  {row}")
+    except Exception as e:
+        log.warning(f"No se pudo obtener muestra de datos de {schema}.{table}: {e}")
+        print(f"No se pudo obtener muestra de datos de {schema}.{table}: {e}")
 
     # Asegurar tabla destino (ajusta engine ORDER BY según dedup_mode)
     try:
