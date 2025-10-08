@@ -18,12 +18,26 @@ class AdvancedHealthValidator:
     
     def __init__(self):
         self.logger = self._setup_logging()
+        # Detectar si estamos ejecutando desde host o contenedor
+        self.execution_context = self._detect_execution_context()
+        
+        if self.execution_context == 'host':
+            # Ejecución desde host - usar localhost con puertos mapeados
+            self.clickhouse_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'localhost')
+            self.clickhouse_database = os.getenv('CLICKHOUSE_DATABASE', 'fgeo_analytics')
+            self.kafka_host = os.getenv('KAFKA_HOST', 'localhost')
+            self.connect_url = os.getenv('DEBEZIUM_CONNECT_URL', 'http://localhost:8083')
+            self.superset_url = os.getenv('SUPERSET_URL', 'http://localhost:8088')
+        else:
+            # Ejecución desde contenedor - usar nombres de servicio
+            self.clickhouse_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse')
+            self.clickhouse_database = os.getenv('CLICKHOUSE_DATABASE', 'fgeo_analytics')
+            self.kafka_host = os.getenv('KAFKA_HOST', 'kafka')
+            self.connect_url = os.getenv('DEBEZIUM_CONNECT_URL', 'http://connect:8083')
+            self.superset_url = os.getenv('SUPERSET_URL', 'http://superset:8088')
+            
+        # Cargar configuración después de establecer las URLs
         self.services_config = self._load_services_config()
-        self.clickhouse_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse')
-        self.clickhouse_database = os.getenv('CLICKHOUSE_DATABASE', 'fgeo_analytics')
-        self.kafka_host = os.getenv('KAFKA_HOST', 'kafka')
-        self.connect_url = os.getenv('DEBEZIUM_CONNECT_URL', 'http://connect:8083')
-        self.superset_url = os.getenv('SUPERSET_URL', 'http://superset:8088')
         
     def _setup_logging(self) -> logging.Logger:
         """Configurar logging avanzado"""
@@ -37,14 +51,40 @@ class AdvancedHealthValidator:
             logger.addHandler(handler)
             
         return logger
+        
+    def _detect_execution_context(self) -> str:
+        """Detectar si estamos ejecutando desde host o contenedor"""
+        try:
+            # Verificar si estamos en un contenedor
+            if os.path.exists('/.dockerenv'):
+                return 'container'
+            # Verificar si podemos resolver nombres de contenedor
+            import socket
+            try:
+                socket.gethostbyname('clickhouse')
+                return 'container'
+            except socket.gaierror:
+                return 'host'
+        except Exception:
+            return 'host'
     
     def _load_services_config(self) -> Dict[str, Any]:
         """Cargar configuración de servicios desde variables de entorno"""
+        # Ajustar URLs según el contexto de ejecución
+        if self.execution_context == 'host':
+            clickhouse_endpoint = 'http://localhost:8123/ping'
+            connect_endpoint = 'http://localhost:8083/connectors'
+            superset_endpoint = 'http://localhost:8088/health'
+        else:
+            clickhouse_endpoint = 'http://clickhouse:8123/ping'
+            connect_endpoint = 'http://connect:8083/connectors'
+            superset_endpoint = 'http://superset:8088/health'
+            
         return {
             'clickhouse': {
                 'name': 'ClickHouse',
                 'container': 'clickhouse',
-                'health_endpoint': 'http://clickhouse:8123/ping',
+                'health_endpoint': clickhouse_endpoint,
                 'required': True,
                 'timeout': 30
             },
@@ -58,14 +98,14 @@ class AdvancedHealthValidator:
             'connect': {
                 'name': 'Debezium Connect',
                 'container': 'connect',
-                'health_endpoint': 'http://connect:8083/connectors',
+                'health_endpoint': connect_endpoint,
                 'required': True,
                 'timeout': 60
             },
             'superset': {
                 'name': 'Superset',
                 'container': 'superset',
-                'health_endpoint': 'http://superset:8088/health',
+                'health_endpoint': superset_endpoint,
                 'required': False,
                 'timeout': 30
             }

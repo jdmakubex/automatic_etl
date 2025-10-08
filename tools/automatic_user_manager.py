@@ -21,6 +21,11 @@ class AutomaticUserManager:
     
     def __init__(self):
         self.logger = self._setup_logging()
+        
+        # Detectar contexto de ejecución
+        self.execution_context = self._detect_execution_context()
+        self.logger.info(f"🔍 Contexto de ejecución detectado: {self.execution_context}")
+        
         self.db_connections = self._load_db_connections()
         self.users_config = self._load_users_config()
         self.session = requests.Session()
@@ -49,7 +54,23 @@ class AutomaticUserManager:
                 pass  # No crítico si no se puede crear el archivo de log
                 
         return logger
-    
+        
+    def _detect_execution_context(self) -> str:
+        """Detectar si estamos ejecutando desde host o contenedor"""
+        try:
+            # Verificar si estamos en un contenedor
+            if os.path.exists('/.dockerenv'):
+                return 'container'
+            # Verificar si podemos resolver nombres de contenedor
+            import socket
+            try:
+                socket.gethostbyname('clickhouse')
+                return 'container'
+            except socket.gaierror:
+                return 'host'
+        except Exception:
+            return 'host'
+        
     def _load_db_connections(self) -> List[Dict[str, Any]]:
         """Cargar configuraciones de conexiones de base de datos"""
         db_connections_str = os.getenv('DB_CONNECTIONS', '[]')
@@ -180,7 +201,11 @@ class AutomaticUserManager:
     def create_clickhouse_users(self) -> Tuple[bool, List[str]]:
         """Crear usuarios ClickHouse con permisos apropiados"""
         issues = []
-        ch_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse')
+        # Configurar host según contexto de ejecución
+        if self.execution_context == 'host':
+            ch_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'localhost')
+        else:
+            ch_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse')
         ch_port = int(os.getenv('CLICKHOUSE_HTTP_PORT', 8123))
         
         try:
@@ -366,7 +391,11 @@ class AutomaticUserManager:
             self.logger.error(f"❌ Test MySQL Debezium: {str(e)}")
         
         # Test ClickHouse users
-        ch_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse')
+        # Configurar host según contexto de ejecución
+        if self.execution_context == 'host':
+            ch_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'localhost')
+        else:
+            ch_host = os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse')
         ch_port = int(os.getenv('CLICKHOUSE_HTTP_PORT', 8123))
         
         for user_key, user_config in self.users_config['clickhouse'].items():

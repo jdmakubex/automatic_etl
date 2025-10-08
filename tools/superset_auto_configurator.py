@@ -61,7 +61,9 @@ class SupersetAutoConfigurator:
     
     def _load_clickhouse_config(self) -> Dict[str, str]:
         """Cargar configuración de ClickHouse"""
-        # Para la conexión de Superset, siempre usar el nombre del contenedor
+        # IMPORTANTE: Superset siempre se ejecuta en contenedor, por lo que 
+        # SIEMPRE debe usar 'clickhouse' como host, independientemente de 
+        # desde dónde se ejecute este configurador
         return {
             'host': 'clickhouse',
             'port': int(os.getenv('CLICKHOUSE_PORT', 8123)),

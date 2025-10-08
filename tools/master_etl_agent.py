@@ -222,19 +222,25 @@ class MasterETLAgent:
         self.logger.info("⚡ === FASE 4: VALIDACIÓN DEL PIPELINE ETL ===")
         
         try:
-            # Ejecutar validaciones del pipeline ETL
-            pipeline_success = self._validate_etl_flow()
+            # Ejecutar validación ETL completa
+            self.logger.info("🔍 Validando flujo MySQL → Kafka → ClickHouse...")
+            validation_process = subprocess.run([
+                'python3', 'tools/validate_etl_simple.py'
+            ], capture_output=True, text=True, timeout=120)
+            
+            pipeline_success = validation_process.returncode == 0
             
             self.results['phases']['phase_4_pipeline'] = {
                 'name': 'Validación Pipeline ETL',
                 'success': pipeline_success,
-                'duration_seconds': (datetime.now() - phase_start).total_seconds()
+                'duration_seconds': (datetime.now() - phase_start).total_seconds(),
+                'validation_output': validation_process.stdout if pipeline_success else validation_process.stderr
             }
             
             if pipeline_success:
                 self.logger.info("✅ FASE 4 COMPLETADA: Pipeline ETL operativo")
             else:
-                self.logger.warning("⚠️  FASE 4 PARCIAL: Pipeline con advertencias")
+                self.logger.warning(f"⚠️  Validación ETL con advertencias: {validation_process.stderr}")
             
             return pipeline_success
             
@@ -403,8 +409,18 @@ class MasterETLAgent:
             # Fase 2: Configurar usuarios
             phase2_success = self.phase_2_configure_users()
             if not phase2_success:
-                self.logger.error("❌ Fallo crítico en Fase 2 - Abortando")
-                return False
+                # Verificar si al menos ClickHouse y Superset están configurados
+                user_details = self.results['phases']['phase_2_users'].get('details', {})
+                connectivity = user_details.get('connectivity_tests', {})
+                
+                clickhouse_ok = any(k.startswith('clickhouse_') and v for k, v in connectivity.items())
+                superset_ok = connectivity.get('superset_admin', False)
+                
+                if clickhouse_ok and superset_ok:
+                    self.logger.warning("⚠️  Fase 2 parcialmente exitosa - Continuando (ClickHouse y Superset funcionando)")
+                else:
+                    self.logger.error("❌ Fallo crítico en Fase 2 - Abortando")
+                    return False
             
             # Pausa más larga para que los servicios se estabilicen
             self.logger.info("⏳ Esperando estabilización de servicios...")
