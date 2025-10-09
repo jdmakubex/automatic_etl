@@ -1,5 +1,5 @@
 version: 1.0.0
 databases:
   - database_name: ClickHouse fgeo_analytics
-    sqlalchemy_uri: clickhousedb+connect://superset:Sup3rS3cret!@clickhouse:8123/fgeo_analytics?protocol=http
+    sqlalchemy_uri: clickhousedb+connect://default:ClickHouse123!@clickhouse:8123/fgeo_analytics?protocol=http
     extra: "{}" 

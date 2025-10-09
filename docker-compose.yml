@@ -89,8 +89,9 @@ services:
       - etl_net
     environment:
       - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fgeo_analytics}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=ClickHouse123!
       - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
     ports:
       - "8123:8123"     # HTTP
       - "9000:9000"     # Native
@@ -99,10 +100,26 @@ services:
       - ./bootstrap/clickhouse_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
       - ./bootstrap/create_users.sql:/docker-entrypoint-initdb.d/01_create_users.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q 'Ok'"]
+      test: ["CMD-SHELL", "clickhouse-client --password=ClickHouse123! --query='SELECT 1' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
+    restart: "no"
+
+  # ---------- CLICKHOUSE SETUP ROBUSTO ----------
+  clickhouse-setup:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse-setup
+    networks:
+      - etl_net
+    environment:
+      - CLICKHOUSE_PASSWORD=ClickHouse123!
+    volumes:
+      - ./bootstrap:/bootstrap:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: ["/bootstrap/setup_clickhouse_robust.sh"]
     restart: "no"
 
   # ---------- SUPERSET ----------
@@ -116,7 +133,7 @@ services:
     environment:
       - SUPERSET_ENV=production
       - SUPERSET_LOAD_EXAMPLES=no
-      - SUPERSET_SECRET_KEY=please_change_me
+      - SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
     volumes:
       - superset_home:/app/superset_home
       - ./superset_bootstrap:/bootstrap:ro
@@ -161,17 +178,41 @@ services:
     environment:
       - SUPERSET_ADMIN=${SUPERSET_ADMIN:-admin}
       - SUPERSET_PASSWORD=${SUPERSET_PASSWORD:-Admin123!}
+      - SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
+    volumes:
+      - ./superset_bootstrap:/bootstrap:ro
     depends_on:
       superset:
         condition: service_healthy
-    entrypoint: ["/bin/sh","-lc"]
+      etl-orchestrator:
+        condition: service_completed_successfully
+    entrypoint: ["/bootstrap/init_superset.sh"]
+    restart: "no"
+
+  # ---------- SUPERSET DATASET CONFIGURATOR ----------
+  superset-datasets:
+    image: python:3.11-slim
+    container_name: superset-datasets
+    networks:
+      - etl_net
+    environment:
+      - SUPERSET_URL=http://superset:8088
+      - SUPERSET_ADMIN=${SUPERSET_ADMIN:-admin}
+      - SUPERSET_PASSWORD=${SUPERSET_PASSWORD:-Admin123!}
+    volumes:
+      - ./superset_bootstrap:/bootstrap:ro
+    depends_on:
+      superset:
+        condition: service_healthy
+      superset-init:
+        condition: service_completed_successfully
+    entrypoint: ["bash", "-c"]
     command: >
-      set -e;
-      superset fab create-admin --username "$SUPERSET_ADMIN" --firstname Admin --lastname User --email admin@example.com --password "$SUPERSET_PASSWORD" || true;
-      superset db upgrade;
-      superset init;
-      superset import-datasources -p /bootstrap/clickhouse_db.yaml || true;
-      echo SUPerset_INIT_OK;
+      apt-get update -qq && apt-get install -y -qq curl &&
+      pip install requests &&
+      echo "Esperando 30 segundos para que Superset esté completamente listo..." &&
+      sleep 30 &&
+      python /bootstrap/configure_datasets.py
     restart: "no"
 
   # ---------- KAFKA (Confluent, KRaft 1 nodo combinado) ----------
@@ -328,7 +369,7 @@ services:
 
 
 
-  # ---------- ORQUESTADOR AUTOMÁTICO DEL PIPELINE ETL ----------
+  # ---------- ORQUESTRADOR AUTOMÁTICO DEL PIPELINE ETL ----------
   etl-orchestrator:
     build:
       context: .
@@ -360,12 +401,14 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      clickhouse-setup:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
-    command: ["python", "tools/orchestrate_etl_init.py"]
+    command: ["python", "tools/ingest_runner.py"]
     restart: "no"
     healthcheck:
-      test: ["CMD-SHELL", "test -f /app/logs/orchestrator.log && echo 'Orchestrator running' || exit 1"]
+      test: ["CMD-SHELL", "test -f /app/logs/ingest.log && echo 'Ingesta completada' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10

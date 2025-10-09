@@ -1,16 +1,24 @@
+-- Script robusto para crear/recrear usuarios en ClickHouse
+-- Se ejecuta con permisos de administrador
+
+-- Eliminar usuarios existentes para recrearlos (forzar recreación)
+DROP USER IF EXISTS etl;
+DROP USER IF EXISTS superset;
+
 -- Crear usuarios ETL y Superset con permisos apropiados
-CREATE USER IF NOT EXISTS etl IDENTIFIED BY 'Et1Ingest!';
-CREATE USER IF NOT EXISTS superset IDENTIFIED BY 'Sup3rS3cret!';
-
--- Otorgar permisos al usuario ETL (completos)
-GRANT ALL ON *.* TO etl WITH GRANT OPTION;
-
--- Otorgar permisos al usuario Superset (solo lectura)
-GRANT SELECT ON *.* TO superset;
+CREATE USER etl IDENTIFIED BY 'Et1Ingest!';
+CREATE USER superset IDENTIFIED BY 'Sup3rS3cret!';
 
 -- Crear base de datos si no existe
 CREATE DATABASE IF NOT EXISTS fgeo_analytics;
 
--- Otorgar permisos específicos en la base de datos
-GRANT ALL ON fgeo_analytics.* TO etl WITH GRANT OPTION;
+-- Otorgar permisos al usuario ETL (completos para ingesta)
+GRANT SELECT, INSERT, CREATE, ALTER, DROP ON fgeo_analytics.* TO etl WITH GRANT OPTION;
+
+-- Otorgar permisos al usuario Superset (solo lectura para visualización)
 GRANT SELECT ON fgeo_analytics.* TO superset;
+GRANT SELECT ON system.* TO superset;
+
+-- Verificar que los usuarios fueron creados
+SELECT 'Usuario etl creado correctamente' as status WHERE EXISTS(SELECT 1 FROM system.users WHERE name = 'etl');
+SELECT 'Usuario superset creado correctamente' as status WHERE EXISTS(SELECT 1 FROM system.users WHERE name = 'superset');

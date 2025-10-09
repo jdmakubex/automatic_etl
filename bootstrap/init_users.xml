@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <users>
+        <default>
+            <password_sha256_hex>c5c8e0b5f7a4b7c3f4b1c2a8e9d8f3c2b5a7e1d6c9f4b8a2e5d9c3f7a1b4e8d2</password_sha256_hex>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <grants>
+                <query>GRANT ALL ON *.* WITH GRANT OPTION</query>
+            </grants>
+        </default>
+    </users>
+</clickhouse>
