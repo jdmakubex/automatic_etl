@@ -660,7 +660,25 @@ def read_table_in_chunks(engine: Engine, schema: str, table: str, chunksize: int
     base_sql = f"SELECT * FROM `{schema}`.`{table}`"
     if limit and limit > 0:
         base_sql += f" LIMIT {int(limit)}"
-    return pd.read_sql(text(base_sql), con=engine, chunksize=chunksize)
+    
+    # Crear directamente PyMySQL connection desde la URL del engine
+    import pymysql
+    url = engine.url
+    
+    # Extraer parámetros de conexión de la URL
+    connection = pymysql.connect(
+        host=url.host,
+        port=url.port or 3306,
+        user=url.username,
+        password=url.password,
+        database=url.database,
+        charset='utf8mb4'
+    )
+    
+    try:
+        return pd.read_sql(base_sql, con=connection, chunksize=chunksize)
+    finally:
+        connection.close()
 
 
 # ---------------------------------
