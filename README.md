@@ -17,7 +17,125 @@ Cargar datos **reales** desde múltiples BDs (MySQL 5.5/MariaDB/PostgreSQL) a Cl
 ## 0) Requisitos
 - Windows 11 + WSL2 Ubuntu (Docker Desktop ON)
 - Puertos libres: 8123 (CH), 8088 (Superset), 9092/19092 (Kafka), 8083 (Connect)
-- Acceso a tus BDs origen (VPN si aplican).
+- Acceso a tus BDs origen (VPN si aplican)
+- **MySQL configurado correctamente** (ver sección 0.1)
+
+---
+
+## 0.1) Configuración MySQL Requerida
+
+Para que el ETL funcione correctamente, MySQL debe estar configurado con los siguientes parámetros y permisos:
+
+### Configuración del servidor MySQL (my.cnf)
+
+**Para CDC con Debezium (tiempo real):**
+```ini
+[mysqld]
+# Habilitar binary logging para CDC
+log-bin=mysql-bin
+binlog_format=ROW
+binlog_row_image=FULL
+
+# Server ID único (importante para replicación)
+server_id=1
+
+# Opcional: retención de logs
+expire_logs_days=7
+max_binlog_size=100M
+```
+
+**Para Bulk loader únicamente:**
+- No requiere configuración especial del servidor
+
+### Usuarios y permisos necesarios
+
+Crear un usuario dedicado para el ETL con los permisos correctos:
+
+```sql
+-- Crear usuario ETL
+CREATE USER 'etl_user'@'%' IDENTIFIED BY 'tu_password_seguro';
+
+-- Permisos para Bulk loader (mínimos)
+GRANT SELECT ON tu_base_datos.* TO 'etl_user'@'%';
+
+-- Permisos adicionales para CDC (Debezium)
+GRANT REPLICATION SLAVE ON *.* TO 'etl_user'@'%';
+GRANT REPLICATION CLIENT ON *.* TO 'etl_user'@'%';
+GRANT SELECT ON tu_base_datos.* TO 'etl_user'@'%';
+
+-- Aplicar cambios
+FLUSH PRIVILEGES;
+```
+
+### Verificar configuración
+
+**Verificar binary logging (necesario para CDC):**
+```sql
+SHOW VARIABLES LIKE 'log_bin';
+SHOW VARIABLES LIKE 'binlog_format';
+SHOW VARIABLES LIKE 'binlog_row_image';
+SHOW VARIABLES LIKE 'server_id';
+```
+
+**Verificar permisos del usuario:**
+```sql
+SHOW GRANTS FOR 'etl_user'@'%';
+```
+
+**Verificar que las tablas tengan claves primarias (recomendado para CDC):**
+```sql
+SELECT 
+    table_schema,
+    table_name,
+    CASE 
+        WHEN EXISTS (
+            SELECT 1 FROM information_schema.table_constraints 
+            WHERE constraint_type = 'PRIMARY KEY' 
+            AND table_schema = t.table_schema 
+            AND table_name = t.table_name
+        ) THEN 'Sí' 
+        ELSE 'No' 
+    END as tiene_primary_key
+FROM information_schema.tables t 
+WHERE table_schema = 'tu_base_datos' 
+AND table_type = 'BASE TABLE'
+ORDER BY table_name;
+```
+
+### Troubleshooting MySQL
+
+**Error: "The MySQL server is not configured as a replica"**
+- Verificar que `log-bin` esté habilitado y `server_id` configurado
+
+**Error: "Access denied for user"**
+- Verificar permisos con `SHOW GRANTS FOR 'usuario'@'%'`
+- Verificar conectividad de red desde contenedores Docker
+
+**Error: "Table without primary key"**
+- Debezium requiere claves primarias para CDC
+- Agregar clave primaria o usar modo snapshot únicamente
+
+### Configuración de ejemplo en DB_CONNECTIONS
+
+```json
+[{
+    "type": "mysql",
+    "name": "mi_base_datos",
+    "host": "172.21.61.53",
+    "port": 3306,
+    "user": "etl_user",
+    "pass": "tu_password_seguro",
+    "db": "mi_base_datos"
+}]
+```
+
+### Notas importantes
+
+1. **Seguridad**: Usar siempre passwords seguros y limitar acceso por IP si es posible
+2. **Performance**: El binary logging puede impactar performance, monitorear espacio en disco
+3. **Backup**: Los binary logs consumen espacio, configurar rotación adecuada
+4. **Red**: Verificar que los puertos MySQL (3306) sean accesibles desde Docker
+5. **Versión**: Probado con MySQL 5.5+ y MariaDB 10.0+
 
 ---
 

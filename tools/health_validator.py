@@ -58,13 +58,10 @@ class AdvancedHealthValidator:
             # Verificar si estamos en un contenedor
             if os.path.exists('/.dockerenv'):
                 return 'container'
-            # Verificar si podemos resolver nombres de contenedor
-            import socket
-            try:
-                socket.gethostbyname('clickhouse')
-                return 'container'
-            except socket.gaierror:
-                return 'host'
+            
+            # Si no hay /.dockerenv, asumimos que estamos en host
+            # No intentamos resolver DNS porque los contenedores pueden no estar corriendo
+            return 'host'
         except Exception:
             return 'host'
     
@@ -177,6 +174,7 @@ class AdvancedHealthValidator:
             query_response = requests.post(
                 f"http://{self.clickhouse_host}:8123/",
                 data="SELECT 1",
+                params={"user": "default", "password": ""},
                 timeout=10
             )
             if query_response.status_code != 200:
@@ -187,6 +185,7 @@ class AdvancedHealthValidator:
             db_response = requests.post(
                 f"http://{self.clickhouse_host}:8123/",
                 data=f"SHOW DATABASES",
+                params={"user": "default", "password": ""},
                 timeout=10
             )
             if self.clickhouse_database not in db_response.text:
@@ -194,6 +193,7 @@ class AdvancedHealthValidator:
                 create_response = requests.post(
                     f"http://{self.clickhouse_host}:8123/",
                     data=f"CREATE DATABASE IF NOT EXISTS {self.clickhouse_database}",
+                    params={"user": "default", "password": ""},
                     timeout=10
                 )
                 if create_response.status_code != 200:

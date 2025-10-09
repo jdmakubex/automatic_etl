@@ -1,8 +1,7 @@
 
 networks:
   etl_net:
-    external: true
-    name: etl_prod_etl_net
+    driver: bridge
 
 volumes:
   ch_data:
@@ -44,7 +43,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: no
+    restart: "no"
   pipeline-gen:
     build:
       context: .
@@ -80,7 +79,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: no
+    restart: "no"
 
   # ---------- CLICKHOUSE ----------
   clickhouse:
@@ -98,12 +97,13 @@ services:
     volumes:
       - ch_data:/var/lib/clickhouse
       - ./bootstrap/clickhouse_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+      - ./bootstrap/create_users.sql:/docker-entrypoint-initdb.d/01_create_users.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q 'Ok'"]
       interval: 10s
       timeout: 5s
       retries: 12
-    restart: no
+    restart: "no"
 
   # ---------- SUPERSET ----------
   superset:
@@ -133,7 +133,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-    restart: no
+    restart: "no"
 
   # ---------- SUPERSET VENV SETUP ----------
   superset-venv-setup:
@@ -150,7 +150,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    restart: no
+    restart: "no"
 
   # ---------- SUPERSET INIT ----------
   superset-init:
@@ -172,7 +172,7 @@ services:
       superset init;
       superset import-datasources -p /bootstrap/clickhouse_db.yaml || true;
       echo SUPerset_INIT_OK;
-    restart: no
+    restart: "no"
 
   # ---------- KAFKA (Confluent, KRaft 1 nodo combinado) ----------
   kafka:
@@ -203,7 +203,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-    restart: no
+    restart: "no"
 
   # ---------- KAFKA CONNECT con Debezium ----------
   connect:
@@ -233,7 +233,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 60
-    restart: no
+    restart: "no"
 
   # ---------- CONFIGURADOR (usa tus scripts) ----------
   configurator:
@@ -263,7 +263,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: no
+    restart: "no"
 
   # ---------- BOOTSTRAP CDC automático (one-shot) ----------
   cdc-bootstrap:
@@ -279,7 +279,6 @@ services:
       - DB_CONNECTIONS=${DB_CONNECTIONS}
       - CLICKHOUSE_HTTP_HOST=clickhouse
       - CLICKHOUSE_HTTP_PORT=8123
-      - CLICKHOUSE_DATABASE=fgeo_analytics
       - CH_USER=etl
       - CH_PASSWORD=Et1Ingest!
     networks:
@@ -300,7 +299,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: no
+    restart: "no"
 
   # ---------- CDC (ejecución directa) ----------
   cdc:
@@ -325,7 +324,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: no
+    restart: "no"
 
 
 
@@ -364,7 +363,7 @@ services:
       kafka:
         condition: service_healthy
     command: ["python", "tools/orchestrate_etl_init.py"]
-    restart: no
+    restart: "no"
     healthcheck:
       test: ["CMD-SHELL", "test -f /app/logs/orchestrator.log && echo 'Orchestrator running' || exit 1"]
       interval: 30s
@@ -395,6 +394,6 @@ services:
       connect:
         condition: service_healthy
     command: ["python", "tools/apply_connectors_auto.py"]
-    restart: no
+    restart: "no"
     profiles:
       - manual  # Solo se ejecuta si se especifica el perfil manual

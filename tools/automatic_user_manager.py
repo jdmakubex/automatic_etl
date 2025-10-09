@@ -199,7 +199,7 @@ class AutomaticUserManager:
         return success, issues
     
     def create_clickhouse_users(self) -> Tuple[bool, List[str]]:
-        """Crear usuarios ClickHouse con permisos apropiados"""
+        """Verificar usuarios ClickHouse predefinidos (no crear dinámicamente)"""
         issues = []
         # Configurar host según contexto de ejecución
         if self.execution_context == 'host':
@@ -209,61 +209,47 @@ class AutomaticUserManager:
         ch_port = int(os.getenv('CLICKHOUSE_HTTP_PORT', 8123))
         
         try:
-            self.logger.info("🏠 Configurando usuarios ClickHouse...")
+            self.logger.info("🏠 Verificando usuarios ClickHouse predefinidos...")
             
             for user_key, user_config in self.users_config['clickhouse'].items():
                 try:
                     username = user_config['username']
                     password = user_config['password']
-                    database = user_config['database']
                     
-                    self.logger.info(f"👤 Creando usuario ClickHouse: {username}")
+                    self.logger.info(f"👤 Verificando usuario ClickHouse: {username}")
                     
-                    # 1. Crear usuario
-                    create_user_sql = f"CREATE USER IF NOT EXISTS {username} IDENTIFIED BY '{password}'"
+                    # Verificar usuario con autenticación
+                    auth = requests.auth.HTTPBasicAuth(username, password)
                     response = requests.post(
                         f"http://{ch_host}:{ch_port}/",
-                        data=create_user_sql,
-                        timeout=15
-                    )
-                    
-                    if response.status_code != 200:
-                        raise Exception(f"Error creando usuario: {response.text}")
-                    
-                    # 2. Otorgar permisos según el tipo de usuario
-                    if 'superset' in user_key:
-                        # Usuario de lectura para Superset
-                        grant_sql = f"GRANT SELECT ON {database}.* TO {username}"
-                    else:
-                        # Usuario ETL con permisos completos
-                        grant_sql = f"GRANT SELECT, INSERT, CREATE, DROP ON {database}.* TO {username}"
-                    
-                    grant_response = requests.post(
-                        f"http://{ch_host}:{ch_port}/",
-                        data=grant_sql,
-                        timeout=15
-                    )
-                    
-                    if grant_response.status_code != 200:
-                        self.logger.warning(f"⚠️  Advertencia otorgando permisos a {username}: {grant_response.text}")
-                    else:
-                        self.logger.info(f"🔐 Permisos otorgados a {username}")
-                    
-                    # 3. Verificar usuario creado
-                    verify_sql = f"SELECT name FROM system.users WHERE name = '{username}'"
-                    verify_response = requests.post(
-                        f"http://{ch_host}:{ch_port}/",
-                        data=verify_sql,
+                        data="SELECT 1",
+                        auth=auth,
                         timeout=10
                     )
                     
-                    if verify_response.status_code == 200 and username in verify_response.text:
-                        self.logger.info(f"✅ Usuario {username} verificado en ClickHouse")
+                    if response.status_code == 200:
+                        self.logger.info(f"✅ Usuario {username} funcionando correctamente")
+                        
+                        # Verificar permisos básicos
+                        database_check = requests.post(
+                            f"http://{ch_host}:{ch_port}/",
+                            data="SHOW DATABASES",
+                            auth=auth,
+                            timeout=10
+                        )
+                        
+                        if database_check.status_code == 200:
+                            self.logger.info(f"🔐 Permisos de {username} verificados")
+                        else:
+                            self.logger.warning(f"⚠️  Permisos limitados para {username}")
+                            
                     else:
-                        self.logger.warning(f"⚠️  Usuario {username} no se pudo verificar")
+                        error_msg = f"Usuario ClickHouse {username} no funciona: {response.status_code} - {response.text}"
+                        self.logger.error(f"❌ {error_msg}")
+                        issues.append(error_msg)
                 
                 except Exception as e:
-                    error_msg = f"Error creando usuario ClickHouse {user_config['username']}: {str(e)}"
+                    error_msg = f"Error verificando usuario ClickHouse {user_config['username']}: {str(e)}"
                     self.logger.error(f"❌ {error_msg}")
                     issues.append(error_msg)
         
@@ -274,7 +260,7 @@ class AutomaticUserManager:
         
         success = len(issues) == 0
         if success:
-            self.logger.info("✅ Usuarios ClickHouse configurados exitosamente")
+            self.logger.info("✅ Usuarios ClickHouse predefinidos verificados exitosamente")
         
         return success, issues
     

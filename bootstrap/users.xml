@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <users>
+        <!-- Usuario default sin password para compatibilidad -->
+        <default>
+            <password></password>
+            <profile>default</profile>
+            <quota>default</quota>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <access_management>1</access_management>
+        </default>
+        
+        <!-- Usuario ETL con permisos completos -->
+        <etl>
+            <password>Et1Ingest!</password>
+            <profile>default</profile>
+            <quota>default</quota>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <access_management>1</access_management>
+        </etl>
+        
+        <!-- Usuario Superset con permisos de lectura -->
+        <superset>
+            <password>Sup3rS3cret!</password>
+            <profile>default</profile>
+            <quota>default</quota>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <access_management>1</access_management>
+        </superset>
+    </users>
+</clickhouse>
