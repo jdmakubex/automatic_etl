@@ -128,7 +128,7 @@ El orquestador ejecuta automáticamente estas **6 fases**:
 
 ```bash
 # MySQL Origen
-MYSQL_HOST=172.21.61.53
+MYSQL_HOST=host.docker.internal
 MYSQL_PORT=3306
 MYSQL_ADMIN_USER=root
 MYSQL_ADMIN_PASSWORD=admin
@@ -249,11 +249,11 @@ docker compose down -v
 #### 1. Error de conexión MySQL
 ```bash
 # Verificar conectividad
-ping 172.21.61.53
-telnet 172.21.61.53 3306
+ping host.docker.internal
+telnet host.docker.internal 3306
 
 # Verificar credenciales
-mysql -h 172.21.61.53 -u root -p
+mysql -h host.docker.internal -u root -p
 ```
 
 #### 2. Servicios no inician

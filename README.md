@@ -121,7 +121,7 @@ ORDER BY table_name;
 [{
     "type": "mysql",
     "name": "mi_base_datos",
-    "host": "172.21.61.53",
+   "host": "host.docker.internal",
     "port": 3306,
     "user": "etl_user",
     "pass": "tu_password_seguro",
@@ -142,8 +142,8 @@ ORDER BY table_name;
 ## 1) .env
 Edita `etl_prod/.env` (o copia desde `.env.example`) y define **DB_CONNECTIONS**. Ejemplo mínimo:
 ```json
-[{"type":"mysql","name":"fiscalizacion","host":"172.21.61.53","port":3306,"user":"user","pass":"***","db":"fiscalizacion"},
- {"type":"mysql","name":"sipoa","host":"172.21.61.54","port":3306,"user":"user","pass":"***","db":"sipoa"}]
+[{"type":"mysql","name":"koko","host":"host.docker.internal","port":3306,"user":"user","pass":"***","db":"koko"},
+ {"type":"mysql","name":"tobi","host":"host.docker.internal","port":3306,"user":"user","pass":"***","db":"tobi"}]
 ```
 Otros:
 ```

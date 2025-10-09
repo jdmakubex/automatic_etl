@@ -25,8 +25,8 @@ Configuración de las bases de datos origen en formato JSON.
 **Ejemplo con múltiples conexiones:**
 ```json
 [
-  {"type":"mysql","name":"fiscalizacion","host":"172.21.61.53","port":3306,"user":"etl_user","pass":"secret","db":"fiscalizacion"},
-  {"type":"mysql","name":"sipoa","host":"172.21.61.54","port":3306,"user":"etl_user","pass":"secret","db":"sipoa"}
+  {"type":"mysql","name":"fiscalizacion","host":"host.docker.internal","port":3306,"user":"etl_user","pass":"secret","db":"fiscalizacion"},
+  {"type":"mysql","name":"sipoa","host":"host.docker.internal","port":3306,"user":"etl_user","pass":"secret","db":"sipoa"}
 ]
 ```
 
