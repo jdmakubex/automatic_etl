@@ -1,3 +1,124 @@
+#!/bin/bash
+
+###############################################################
+# [DOCUMENTACIÓN GENERAL DEL PIPELINE ETL]
+# -------------------------------------------------------------
+# Script maestro para automatizar el pipeline ETL completo:
+#   - Limpieza robusta de contenedores, volúmenes y red Docker
+#   - Validación de entorno, dependencias y permisos
+#   - Construcción y despliegue de servicios base (ClickHouse, Superset, Kafka, etc.)
+#   - Ejecución de scripts de ingesta, creación de tablas y validaciones automáticas
+#   - Exportación y verificación de datasets en Superset
+#
+# [Historial de cambios críticos]
+# - Se reforzó la limpieza de la red Docker 'etl_prod_etl_net' para evitar conflictos de etiquetas y duplicaciones que bloqueaban el arranque de servicios (ver sección dedicada más abajo).
+# - Se agregaron validaciones automáticas de entorno, dependencias y permisos antes de la ingesta.
+# - El pipeline es idempotente: todos los servicios y recursos se recrean desde cero en cada ejecución.
+# - Se adaptó la lógica para compatibilidad total con Superset y drivers de ClickHouse.
+# - Se documentan advertencias y buenas prácticas para evitar romper procesos externos.
+#
+# [Referencias y troubleshooting]
+# - docs/ERROR_RECOVERY.md: Solución de errores comunes y recuperación.
+# - README_AUTOMATIZADO.md: Resumen de automatización y flujo general.
+# - logs/etl_full.log: Registro detallado de cada ejecución.
+#
+# Si realizas cambios en la lógica de red, servicios o validaciones, documenta aquí el motivo y el impacto esperado.
+###############################################################
+
+# Cargar variables de entorno desde .env si existe
+
+# Función para logging con timestamp y nivel
+log_info() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $*" | tee -a logs/etl_full.log
+}
+
+log_error() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [ERROR] $*" | tee -a logs/etl_full.log >&2
+}
+
+log_warning() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [WARNING] $*" | tee -a logs/etl_full.log
+}
+
+# Función para manejo de errores fatales
+handle_fatal_error() {
+    log_error "Error fatal: $1"
+    log_error "Consulta docs/ERROR_RECOVERY.md para soluciones"
+    exit 1
+}
+
+# Función para manejo de errores recuperables
+handle_recoverable_error() {
+    log_warning "Error recuperable: $1"
+    log_warning "Intentando continuar..."
+    return 0
+}
+
+# Crear directorio de logs si no existe
+mkdir -p logs
+
+
+# [DOCUMENTACIÓN] Carga robusta de variables de entorno
+# -----------------------------------------------------
+# El archivo .env debe estar disponible en el volumen compartido /app
+# para que todos los scripts internos (Bash y Python) accedan a las variables.
+# Si no se encuentra, advierte y continúa (algunos valores pueden faltar).
+
+# Copiar y limpiar .env para uso en contenedores
+if [ -f .env ]; then
+  # Crear .env.clean sin comentarios ni líneas vacías, preservando el original
+  grep -v '^#' .env | grep -v '^$' > .env.clean
+  cp .env.clean ./tools/.env
+  cp .env.clean ./generated/default/.env_auto
+  log_info "Variables de entorno cargadas y copiadas limpias a volúmenes compartidos (.env.clean, .env_auto). El archivo .env original se preserva."
+else
+  log_warning "No se encontró archivo .env, algunas variables pueden faltar."
+fi
+
+
+# Eliminar red Docker conflictiva si existe (forzado, con espera y reintento)
+
+###############################################################
+# [DOCUMENTACIÓN] Limpieza robusta de recursos Docker
+# -------------------------------------------------------------
+# La red 'etl_net' ahora es gestionada automáticamente por Docker Compose.
+# Ya no se elimina manualmente, evitando conflictos y errores de etiquetas.
+#
+# El pipeline elimina contenedores y volúmenes, y deja que Compose gestione
+# la red según el ciclo de vida de los servicios. Esto garantiza idempotencia
+# y evita afectar recursos externos o compartidos.
+#
+# Referencia: docs/ERROR_RECOVERY.md y README_AUTOMATIZADO.md
+###############################################################
+log_info "Deteniendo servicios y limpiando recursos Docker..."
+docker compose down -v 2>&1 | tee -a logs/etl_full.log || log_warning "docker compose down falló o no había servicios activos"
+
+# Script maestro para lanzar todo el pipeline ETL y validar cada paso
+# Mensajes y comprobaciones en español
+
+###############################################################
+# [DOCUMENTACIÓN DE FLUJO Y CONTROL DE CAMBIOS]
+# -------------------------------------------------------------
+# Esta sección ejecuta la validación de entorno, limpieza de recursos,
+# despliegue de servicios y validaciones automáticas. Cada paso está
+# documentado para facilitar auditoría y troubleshooting.
+#
+# - Validaciones previas aseguran que las variables críticas y dependencias
+#   estén presentes antes de continuar. Si alguna falla, se aborta o se
+#   intenta continuar según el tipo de error.
+# - La limpieza de contenedores, volúmenes y red Docker garantiza que el
+#   pipeline sea idempotente y no se acumulen recursos obsoletos.
+# - El despliegue de servicios base se realiza en modo robusto, con
+#   comprobación de salud y dependencias antes de la ingesta.
+# - Se documentan advertencias y buenas prácticas para evitar romper
+#   procesos externos o dependencias compartidas.
+# - El registro de cada paso queda en logs/etl_full.log para análisis posterior.
+#
+# Si modificas la lógica de validaciones, limpieza o despliegue, documenta aquí
+# el motivo y el impacto esperado. Esto ayuda a mantener trazabilidad y control
+# sobre el pipeline ETL.
+###############################################################
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -36,6 +157,9 @@ mkdir -p logs
 
 log_info "=== Iniciando pipeline ETL completo ==="
 
+set -a
+source .env
+set +a
 # Validar variables de entorno críticas antes de comenzar
 log_info "Validando variables de entorno..."
 if [ -z "${DB_CONNECTIONS:-}" ]; then
@@ -65,12 +189,25 @@ fi
 
 
 # 1. Limpieza y preparación
-log_info "Limpiando contenedores, volúmenes y red..."
+###############################################################
+###############################################################
+# [ROBUSTECIMIENTO] Limpieza automática de red conflictiva
+# -------------------------------------------------------------
+# Antes de iniciar el pipeline, elimina la red 'etl_prod_etl_net' si existe,
+# para evitar conflictos de etiquetas y asegurar que Compose la gestione correctamente.
+# Esto soluciona el error recurrente de red con etiquetas incorrectas.
+if docker network inspect etl_prod_etl_net >/dev/null 2>&1; then
+  log_warning "Red Docker conflictiva 'etl_prod_etl_net' detectada. Eliminando para evitar errores de etiquetas..."
+  docker network rm etl_prod_etl_net 2>&1 | tee -a logs/etl_full.log || log_warning "No se pudo eliminar la red conflictiva, puede que no exista."
+else
+  log_info "No se detectó red conflictiva 'etl_prod_etl_net'."
+fi
+###############################################################
+###############################################################
+log_info "Limpiando contenedores y volúmenes..."
 docker compose down -v 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "docker compose down falló"
 # Elimina todos los contenedores activos (forzado)
 docker ps -aq | xargs -r docker rm -f 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "No hay contenedores para eliminar"
-docker network rm etl_prod_etl_net 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "Red no existe"
-docker network create etl_prod_etl_net 2>&1 | tee -a logs/etl_full.log || handle_fatal_error "No se pudo crear la red"
 docker volume prune -f 2>&1 | tee -a logs/etl_full.log || handle_recoverable_error "No hay volúmenes para limpiar"
 log_info "✓ Limpieza completada"
 
@@ -104,6 +241,22 @@ for SVC in clickhouse superset kafka connect pipeline-gen etl-tools configurator
   else
     log_info "Servicio $SVC: Estado de salud = $STATUS"
   fi
+done
+
+# [CAMBIO] Inicialización robusta de ClickHouse ahora se ejecuta de forma interna
+# -------------------------------------------------------------------------------
+# Se ejecuta el script de setup desde el volumen compartido, usando docker exec
+# para evitar dependencias externas y asegurar que la configuración se realiza
+# directamente en el contenedor de ClickHouse.
+#
+# El script debe estar accesible en /app/bootstrap/setup_clickhouse_robust.sh
+# (montado por volumen compartido). Si falla, se documenta en el log y se aborta.
+log_info "Ejecutando inicialización robusta de ClickHouse desde el contenedor..."
+if docker exec clickhouse bash /app/bootstrap/setup_clickhouse_robust.sh 2>&1 | tee -a logs/etl_full.log; then
+  log_info "✓ Inicialización robusta de ClickHouse completada"
+else
+  handle_fatal_error "Falló la inicialización robusta de ClickHouse (ver logs/etl_full.log)"
+fi
 done
 
 # Si hay servicios no saludables, advertir pero continuar

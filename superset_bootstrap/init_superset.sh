@@ -52,9 +52,10 @@ else
     echo "❌ No se encontró archivo de configuración de ClickHouse"
 fi
 
-echo "🔍 Verificando conexión a ClickHouse..."
-# Usar el CLI de superset para probar la conexión
-superset fab test-db-connection ClickHouse || echo "⚠️  No se pudo probar la conexión automáticamente"
+# Sincronizar metadatos y refrescar esquemas/tablas
+echo "🔄 Sincronizando metadatos de bases de datos..."
+superset db upgrade
+superset init
 
 echo "📋 Listando usuarios creados:"
 superset fab list-users

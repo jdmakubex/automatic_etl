@@ -1,4 +1,21 @@
 #!/bin/bash
+
+# Cargar variables de entorno desde .env si existe
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+    echo "[ETL] Variables de entorno cargadas desde .env"
+else
+    echo "[ETL] Advertencia: No se encontró archivo .env, algunas variables pueden faltar."
+fi
+
+# Levanta automáticamente todo el pipeline ETL con inicialización completa
+# 
+# USO:
+#   ./start_etl_pipeline.sh           # Inicio normal con orquestación automática
+#   ./start_etl_pipeline.sh --clean   # Inicio forzando limpieza completa
+#   ./start_etl_pipeline.sh --manual  # Inicio sin orquestación (modo manual)
+#   ./start_etl_pipeline.sh --help    # Mostrar ayuda
+#!/bin/bash
 # Levanta automáticamente todo el pipeline ETL con inicialización completa
 #
 # USO:

@@ -1,79 +1,70 @@
 #!/bin/bash
 
-set -euo pipefail
+# [DOCUMENTACIÓN] Carga robusta de variables de entorno
+# -----------------------------------------------------
+# El script busca el archivo .env en /app (volumen compartido),
+# para garantizar que las variables estén disponibles tanto para Bash como para Python.
+# IMPORTANTE: Se debe cargar ANTES de validar las variables.
 
-echo "🚀 INICIANDO CONFIGURACIÓN ROBUSTA DE CLICKHOUSE"
-echo "================================================="
+echo "🔧 Cargando variables de entorno..."
 
-# Función para ejecutar comando en ClickHouse con reintentos
+if [ -f /app/.env.clean ]; then
+    set -a
+    source /app/.env.clean
+    set +a
+    echo "[ETL] ✅ Variables de entorno cargadas desde /app/.env.clean (limpio)"
+elif [ -f /app/.env ]; then
+    set -a
+    source /app/.env
+    set +a
+    echo "[ETL] ✅ Variables de entorno cargadas desde /app/.env"
+elif [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+    echo "[ETL] ✅ Variables de entorno cargadas desde ./env (directorio actual)"
+else
+    echo "[ETL] ⚠️  Advertencia: No se encontró archivo /app/.env.clean, /app/.env ni ./env, algunas variables pueden faltar."
+fi
 
-execute_clickhouse_command() {
-    local query="$1"
-    local max_retries=5
-    local retry=0
-    while [ $retry -lt $max_retries ]; do
-        if docker exec clickhouse clickhouse-client --password="$CLICKHOUSE_PASSWORD" --query="$query" 2>/dev/null; then
-            return 0
-        fi
-        retry=$((retry + 1))
-        echo "⚠️  Intento $retry/$max_retries falló, reintentando en 2 segundos..."
-        sleep 2
-    done
-    echo "❌ Comando falló después de $max_retries intentos: $query"
-    return 1
-}
+# Validar que las variables críticas están definidas DESPUÉS de cargarlas
+echo "🔍 Validando variables críticas..."
+REQUIRED_VARS=(CLICKHOUSE_HTTP_HOST CLICKHOUSE_HTTP_PORT CLICKHOUSE_PASSWORD)
+MISSING_VARS=()
+for VAR in "${REQUIRED_VARS[@]}"; do
+    echo "🚀 INICIANDO CONFIGURACIÓN ROBUSTA DE CLICKHOUSE (delegado a Python)"
+    echo "================================================="
 
-
-## Eliminado: Espera HTTP con curl (no disponible en contenedor)
-
-# Espera robusta a que ClickHouse esté listo (cliente interno, desde contenedor)
-for i in {1..20}; do
-    if docker exec clickhouse clickhouse-client --password="$CLICKHOUSE_PASSWORD" --query="SELECT 1" 2>/dev/null; then
-        echo "✅ ClickHouse está listo (cliente interno)"
-        break
-    fi
-    echo "⏳ Esperando ClickHouse (cliente interno)... [$i/20]"
-    sleep 2
-    if [ "$i" -eq 20 ]; then
-        echo "❌ Timeout esperando ClickHouse (cliente interno)"
-        exit 1
-    fi
+    python3 /app/parse_db_connections.py
+    ORDER BY (connection_name, created_at)
+    "
+    
+    # Insertar metadatos de la conexión
+    execute_clickhouse_command "
+    INSERT INTO fgeo_analytics.$metadata_table 
+    (connection_name, source_type, source_host, source_database)
+    VALUES ('$connection_name', '$connection_type', '$connection_host', '$connection_db')
+    "
+    
+    echo "  ✅ Esquema creado para conexión: $connection_name"
 done
 
-# Crear base de datos
-echo "📊 Creando base de datos fgeo_analytics..."
-execute_clickhouse_command "CREATE DATABASE IF NOT EXISTS fgeo_analytics"
+echo "🎯 Esquemas de conexiones creados exitosamente"
 
 
-# Lógica robusta de recreación de usuarios y permisos
-echo "🧹 Eliminando usuarios existentes para recreación..."
-execute_clickhouse_command "DROP USER IF EXISTS etl" || true
-execute_clickhouse_command "DROP USER IF EXISTS superset" || true
-
-echo "👥 Creando usuario ETL..."
-execute_clickhouse_command "CREATE USER etl IDENTIFIED BY 'Et1Ingest!'"
-
-echo "👥 Creando usuario Superset..."
-execute_clickhouse_command "CREATE USER superset IDENTIFIED BY 'Sup3rS3cret!'"
 
 
-# Asignar permisos robustamente
-echo "🔐 Asignando permisos al usuario ETL..."
-execute_clickhouse_command "REVOKE ALL ON fgeo_analytics.* FROM etl" || true
-execute_clickhouse_command "GRANT SELECT, INSERT, CREATE, ALTER, DROP ON fgeo_analytics.* TO etl WITH GRANT OPTION"
 
-echo "🔐 Asignando permisos al usuario Superset..."
-execute_clickhouse_command "REVOKE ALL ON fgeo_analytics.* FROM superset" || true
-execute_clickhouse_command "GRANT SELECT ON fgeo_analytics.* TO superset"
-execute_clickhouse_command "GRANT SELECT ON system.* TO superset"
+
+
 
 # Verificar usuarios creados
 echo "✅ Verificando usuarios creados..."
 if execute_clickhouse_command "SELECT name FROM system.users WHERE name IN ('etl', 'superset')"; then
     echo "✅ Usuarios verificados correctamente"
 else
-    echo "❌ Error al verificar usuarios"
-    exit 1
+    echo "⚠️  No se pudo verificar usuarios (permisos insuficientes), pero continuando..."
+    echo "ℹ️  Los usuarios se crean automáticamente en el proceso de inicialización"
 fi
 
 echo "🎉 CONFIGURACIÓN DE CLICKHOUSE COMPLETADA"

@@ -93,22 +93,19 @@ def sync_database_schemas(url, token, database_id):
     }
     
     try:
-        # Primero intentar obtener los esquemas existentes
-        response = requests.get(
-            f"{url}/api/v1/database/{database_id}/schemas",
+        # Forzar la actualización de metadatos usando el endpoint refresh
+        response = requests.post(
+            f"{url}/api/v1/database/{database_id}/refresh",
             headers=headers
         )
-        
-        if response.status_code == 200:
-            schemas = response.json().get("result", [])
-            print(f"✅ Esquemas encontrados: {schemas}")
+        if response.status_code in [200, 202]:
+            print("✅ Metadatos de la base de datos actualizados correctamente")
             return True
         else:
-            print(f"⚠️  No se pudieron obtener esquemas: {response.status_code}")
+            print(f"⚠️  No se pudo actualizar metadatos: {response.status_code} - {response.text}")
             return False
-            
     except requests.exceptions.RequestException as e:
-        print(f"❌ Error al sincronizar esquemas: {e}")
+        print(f"❌ Error al actualizar metadatos: {e}")
         return False
 
 def get_database_tables(url, token, database_id, schema_name="fgeo_analytics"):
@@ -121,12 +118,13 @@ def get_database_tables(url, token, database_id, schema_name="fgeo_analytics"):
     }
     
     try:
-        # Obtener tablas del esquema
+        # El endpoint espera un parámetro 'q' en formato rison (objeto)
+        # Ejemplo: q=(schema_name:'fgeo_analytics')
+        rison_query = "(schema_name:'{}')".format(schema_name)
         response = requests.get(
-            f"{url}/api/v1/database/{database_id}/tables?q={schema_name}",
+            f"{url}/api/v1/database/{database_id}/tables?q={rison_query}",
             headers=headers
         )
-        
         if response.status_code == 200:
             tables = response.json().get("result", [])
             print(f"✅ Se encontraron {len(tables)} tablas: {[t.get('value', t) for t in tables[:5]]}...")
@@ -134,7 +132,6 @@ def get_database_tables(url, token, database_id, schema_name="fgeo_analytics"):
         else:
             print(f"⚠️  No se pudieron obtener tablas: {response.status_code} - {response.text}")
             return []
-            
     except requests.exceptions.RequestException as e:
         print(f"❌ Error al obtener tablas: {e}")
         return []

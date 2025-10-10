@@ -1,13 +1,16 @@
 
 networks:
   etl_net:
-    driver: bridge
-
+    # [DOCUMENTACIÓN] La red 'etl_net' es gestionada automáticamente por Docker Compose.
+    # Se elimina 'external: true' para evitar conflictos y asegurar que Compose cree y elimine la red según el ciclo del pipeline.
+    # Esto garantiza que todos los servicios se comuniquen correctamente y la limpieza no afecte recursos externos.
+    name: etl_prod_etl_net
 volumes:
   ch_data:
   kafka_data:
   connect_data:
   superset_home:
+  etl_logs:
 
 services:
 # ---------- ETL TOOLS (ingest_runner) ----------
@@ -43,7 +46,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: "no"
   pipeline-gen:
     build:
       context: .
@@ -79,7 +81,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: "no"
 
   # ---------- CLICKHOUSE ----------
   clickhouse:
@@ -94,9 +95,8 @@ services:
       - CLICKHOUSE_USER=default
     ports:
       - "8123:8123"     # HTTP
-      - "9000:9000"     # Native
     volumes:
-      - ch_data:/var/lib/clickhouse
+      - ./bootstrap:/app:ro
       - ./bootstrap/clickhouse_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
       - ./bootstrap/create_users.sql:/docker-entrypoint-initdb.d/01_create_users.sql:ro
     healthcheck:
@@ -104,23 +104,29 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    restart: "no"
 
   # ---------- CLICKHOUSE SETUP ROBUSTO ----------
   clickhouse-setup:
-    image: clickhouse/clickhouse-server:24.3
+    build:
+      context: ./bootstrap
+      dockerfile: Dockerfile.clickhouse-setup
+    image: clickhouse-setup:latest
     container_name: clickhouse-setup
     networks:
       - etl_net
     environment:
-      - CLICKHOUSE_PASSWORD=ClickHouse123!
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_NATIVE_PORT=9000
+      - CH_USER=etl
+      - CH_PASSWORD=Et1Ingest!
+      - CH_DB=fgeo_analytics
+      - DB_CONNECTIONS=${DB_CONNECTIONS}
     volumes:
-      - ./bootstrap:/bootstrap:ro
+      - ./bootstrap:/app:ro
     depends_on:
       clickhouse:
         condition: service_healthy
-    entrypoint: ["/bootstrap/setup_clickhouse_robust.sh"]
-    restart: "no"
+    entrypoint: python3 /app/parse_db_connections.py
 
   # ---------- SUPERSET ----------
   superset:
@@ -150,7 +156,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-    restart: "no"
 
   # ---------- SUPERSET VENV SETUP ----------
   superset-venv-setup:
@@ -167,7 +172,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    restart: "no"
 
   # ---------- SUPERSET INIT ----------
   superset-init:
@@ -187,7 +191,6 @@ services:
       etl-orchestrator:
         condition: service_completed_successfully
     entrypoint: ["/bootstrap/init_superset.sh"]
-    restart: "no"
 
   # ---------- SUPERSET DATASET CONFIGURATOR ----------
   superset-datasets:
@@ -213,7 +216,6 @@ services:
       echo "Esperando 30 segundos para que Superset esté completamente listo..." &&
       sleep 30 &&
       python /bootstrap/configure_datasets.py
-    restart: "no"
 
   # ---------- KAFKA (Confluent, KRaft 1 nodo combinado) ----------
   kafka:
@@ -244,7 +246,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-    restart: "no"
 
   # ---------- KAFKA CONNECT con Debezium ----------
   connect:
@@ -274,7 +275,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 60
-    restart: "no"
 
   # ---------- CONFIGURADOR (usa tus scripts) ----------
   configurator:
@@ -304,7 +304,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: "no"
 
   # ---------- BOOTSTRAP CDC automático (one-shot) ----------
   cdc-bootstrap:
@@ -340,7 +339,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: "no"
 
   # ---------- CDC (ejecución directa) ----------
   cdc:
@@ -365,7 +363,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: "no"
 
 
 
@@ -406,7 +403,6 @@ services:
       kafka:
         condition: service_healthy
     command: ["python", "tools/ingest_runner.py"]
-    restart: "no"
     healthcheck:
       test: ["CMD-SHELL", "test -f /app/logs/ingest.log && echo 'Ingesta completada' || exit 1"]
       interval: 30s
@@ -437,6 +433,5 @@ services:
       connect:
         condition: service_healthy
     command: ["python", "tools/apply_connectors_auto.py"]
-    restart: "no"
     profiles:
       - manual  # Solo se ejecuta si se especifica el perfil manual

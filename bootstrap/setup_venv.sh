@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+
+# Cargar variables de entorno desde .env si existe
+if [ -f .env ]; then
+	export $(grep -v '^#' .env | xargs)
+	echo "[ETL] Variables de entorno cargadas desde .env"
+else
+	echo "[ETL] Advertencia: No se encontró archivo .env, algunas variables pueden faltar."
+fi
+
+set -euo pipefail
+
+python -m venv /app/.venv
+#!/usr/bin/env bash
 set -euo pipefail
 
 python -m venv /app/.venv

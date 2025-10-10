@@ -1,3 +1,15 @@
+# El log de la inicialización robusta de ClickHouse ahora se encuentra en logs/clickhouse_setup.log, accesible externamente junto a los demás logs del pipeline. Puedes consultarlo con:
+#   tail -f logs/clickhouse_setup.log
+# NOTA: El volumen ./tools:/app/tools fue eliminado del servicio clickhouse-setup en docker-compose.yml para evitar errores de montaje y simplificar el contenedor. Solo se monta ./bootstrap y ./logs.
+# NOTA: El contenedor de setup robusto ya no instala clickhouse-client. Toda la inicialización se realiza vía Python y la librería clickhouse-driver, lo que simplifica la imagen y evita dependencias innecesarias.
+# NOTA: El setup robusto de ClickHouse ahora toma todas las variables de entorno directamente del compose y no requiere copiar .env.clean al contenedor. El script Python accede a DB_CONNECTIONS y demás variables vía os.environ.
+# [SOLUCIÓN DE ERROR RECURRENTE DE RED DOCKER]
+# -------------------------------------------------------------
+# Si al ejecutar el pipeline aparece el error:
+#   "network etl_prod_etl_net was found but has incorrect label com.docker.compose.network set to \"\" (expected: \"etl_net\")"
+# Elimina manualmente la red antes de volver a ejecutar:
+#   docker network rm etl_prod_etl_net
+# Esto garantiza que Docker Compose pueda crear la red correctamente y evitar el conflicto de etiquetas.
 # 🚀 PIPELINE ETL AUTOMÁTICO - MySQL → Kafka → ClickHouse
 
 ## 🎯 DESCRIPCIÓN
@@ -330,3 +342,32 @@ Con un solo comando tienes un pipeline ETL completamente funcional:
 ```
 
 **¡Tu datos fluyen automáticamente desde MySQL hasta ClickHouse con visualización en Superset!** 🚀
+
+
+# --- [2025-10-09] MIGRACIÓN CRÍTICA: SETUP CLICKHOUSE CON PYTHON ---
+# Se migró el proceso de setup robusto de ClickHouse a un script Python:
+# - PROBLEMA: El parseo nativo en bash era frágil y dependía del formato exacto del JSON
+# - SOLUCIÓN: Usar Python (clickhouse-driver) para parsear DB_CONNECTIONS y ejecutar toda la secuencia de inicialización
+# - LOGGING: Todos los eventos y errores se registran en logs detallados (/logs/clickhouse_setup.log)
+# - DOCKER: Nuevo Dockerfile.clickhouse-setup basado en python:3.11-slim con clickhouse-driver y clickhouse-client
+# - COMPOSE: El servicio clickhouse-setup ahora usa la nueva imagen y ejecuta el script Python robusto
+#
+# Cambios realizados:
+# 1. Script parse_db_connections.py: parsea DB_CONNECTIONS, conecta a ClickHouse y crea esquemas/metadatos ✅
+# 2. Dockerfile.clickhouse-setup: instala Python y clickhouse-driver, copia el script y .env ✅
+# 3. docker-compose.yml: el servicio clickhouse-setup usa la nueva imagen y ejecuta el script Python, logueando todo en /logs/clickhouse_setup.log ✅
+# 4. Logging robusto: todos los pasos y errores se documentan en los logs y en la salida estándar ✅
+# 5. Documentación actualizada aquí y en los scripts involucrados ✅
+#
+# Formato correcto en .env (array JSON, puede ir entre comillas simples si es necesario):
+#   DB_CONNECTIONS='[{"name":"default","type":"mysql","host":"172.21.61.53","port":3306,"user":"juan.marcos","pass":"123456","db":"archivos"}]'
+#
+# Para consultar los logs del setup robusto:
+#   tail -f logs/clickhouse_setup.log
+#
+# El script ahora:
+# - Parsea DB_CONNECTIONS con json.loads (robusto)
+# - Usa clickhouse-driver para ejecutar comandos y crear esquemas
+# - Registra todos los eventos y errores en logs para debugging completo
+# - Permite fácil extensión para nuevos tipos de conexión y validaciones
+# ---
