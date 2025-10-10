@@ -342,72 +342,201 @@ def coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --- NUEVO: Preprocesamiento de DataFrame para ClickHouse ---
-def preprocess_dataframe_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
+def clean_integer_column(series: pd.Series, is_primary_key: bool = False, column_name: str = "unknown") -> pd.Series:
+    """
+    Limpia una columna que debería ser entero, manejando casos problemáticos:
+    - Strings numéricos -> int
+    - 'null', 'NULL', 'nan', 'NaN', '', 'None' -> None (o 0 si es PK)
+    - Valores válidos -> int
+    """
+    log.info(f"🧹 Limpiando columna integer: {column_name} (PK: {is_primary_key}, dtype: {series.dtype}, valores: {len(series)})")
+    
+    problematic_values = []
+    null_count = 0
+    converted_count = 0
+    
+    def clean_value(val):
+        nonlocal null_count, converted_count
+        original_val = val
+        
+        # Manejo específico para NaN de pandas/numpy
+        if pd.isna(val):
+            null_count += 1
+            return 0 if is_primary_key else None
+        
+        # Si ya es None, mantenerlo así
+        if val is None:
+            null_count += 1
+            return 0 if is_primary_key else None
+        
+        # Convertir a string para análisis
+        str_val = str(val).strip()
+        
+        # Casos que representan NULL
+        null_values = {'null', 'NULL', 'nan', 'NaN', 'None', '', 'na', 'NA'}
+        if str_val.lower() in [v.lower() for v in null_values]:
+            null_count += 1
+            return 0 if is_primary_key else None
+        
+        # Intentar conversión a entero
+        try:
+            # Manejar decimales que son realmente enteros (ej: "123.0" -> 123)
+            if '.' in str_val:
+                float_val = float(str_val)
+                if float_val.is_integer():
+                    converted_count += 1
+                    return int(float_val)
+                else:
+                    # Si es decimal y no PK, puede ser None
+                    null_count += 1
+                    return 0 if is_primary_key else None
+            else:
+                converted_count += 1
+                return int(str_val)
+        except (ValueError, TypeError):
+            # Registrar valor problemático para debug
+            if len(problematic_values) < 5:  # Solo primeros 5 para no saturar logs
+                problematic_values.append(repr(original_val))
+            # Si no se puede convertir y es PK, usar 0
+            null_count += 1
+            return 0 if is_primary_key else None
+    
+    result = series.apply(clean_value)
+    
+    # Log detallado de resultados
+    log.info(f"🧹 Columna {column_name} procesada: {converted_count} convertidos, {null_count} nulls/NaN → {0 if is_primary_key else 'None'}")
+    
+    # Log de debug si hay valores problemáticos
+    if problematic_values:
+        log.warning(f"🧹 Columna {column_name}: {len(problematic_values)} valores problemáticos encontrados: {problematic_values}")
+    
+    return result
+
+
+def preprocess_dataframe_for_clickhouse(df: pd.DataFrame, primary_keys: set = None, column_types: dict = None) -> pd.DataFrame:
     """
     Preprocesa el DataFrame para asegurar compatibilidad con ClickHouse,
-    especialmente en el manejo de valores nulos en columnas numéricas.
+    especialmente en el manejo de valores nulos en columnas numéricas y foreign keys.
+    
+    Args:
+        df: DataFrame a procesar
+        primary_keys: Set de nombres de columnas que son PRIMARY KEY
+        column_types: Dict con tipos de columnas MySQL (ej: {'col1': 'int(10)', 'col2': 'varchar(255)'})
+    
+    IMPORTANTE: 
+    - Los campos PRIMARY KEY nunca se convierten a None.
+    - Los campos INT que no son PK se limpian robustamente para manejar foreign keys con datos sucios.
     """
+    if primary_keys is None:
+        primary_keys = set()
+    if column_types is None:
+        column_types = {}
+    
     df = df.copy()
     
     for col in df.columns:
-        dtype = df[col].dtype
-        # Si la columna es object, puede tener strings numéricos
+        dtype = str(df[col].dtype)
+        is_pk = col in primary_keys
+        mysql_type = column_types.get(col, '').lower()
+        is_int_column = 'int' in mysql_type or dtype.startswith(('int', 'Int'))
+        
+        # Debug logging para primera columna problemática conocida
+        if col in ['tipo', 'expedientestemp_id', 'indiciados_id', 'narcoticos_id']:
+            log.info(f"🐛 DEBUG {col}: pandas_dtype='{dtype}', mysql_type='{mysql_type}', is_int_column={is_int_column}, is_pk={is_pk}")
+        
+        # Limpieza especial para columnas INT (primary keys y foreign keys)
+        if is_int_column:
+            log.info(f"🔧 Procesando columna INT detectada: {col} (MySQL: {mysql_type}, PK: {is_pk})")
+            df[col] = clean_integer_column(df[col], is_primary_key=is_pk, column_name=col)
+            continue
+        
+        # Para columnas object que pueden contener números (pero no detectadas como INT)
         if dtype == 'object':
-            # Convertir strings numéricos a número, vacíos a NaN
-            cleaned = df[col].replace(r'^\s*$', pd.NA, regex=True)
-            numeric_series = pd.to_numeric(cleaned, errors='coerce')
-            # Si la mayoría son enteros, usar Int64; si hay decimales, usar Float64
-            try:
-                non_null_values = numeric_series.dropna()
-                if len(non_null_values) > 0 and (non_null_values % 1 == 0).all():
-                    df[col] = numeric_series.astype('Int64')
+            series = df[col]
+            # Primero convertir todo a string para limpiar
+            series_str = series.astype(str)
+            
+            # Intentar conversión numérica
+            numeric_conversion = pd.to_numeric(series_str, errors='coerce')
+            if not numeric_conversion.isna().all():
+                # Es mayormente numérico - usar limpieza de enteros si parece ser entero
+                non_null_numeric = numeric_conversion.dropna()
+                if len(non_null_numeric) > 0 and (non_null_numeric % 1 == 0).all():
+                    # Parece ser columna de enteros
+                    df[col] = clean_integer_column(series, is_primary_key=is_pk, column_name=col)
                 else:
-                    df[col] = numeric_series.astype('Float64')
-            except:
-                df[col] = cleaned
-        elif str(dtype).startswith('int'):
-            try:
-                df[col] = df[col].astype('Int64')
-            except:
-                pass
-        elif str(dtype).startswith('float'):
-            try:
-                df[col] = df[col].astype('Float64')
-            except:
-                pass
-    return df
+                    # Es flotante
+                    if is_pk:
+                        df[col] = [0.0 if pd.isna(x) else float(x) for x in numeric_conversion]
+                    else:
+                        df[col] = [None if pd.isna(x) else float(x) for x in numeric_conversion]
+            else:
+                # No es numérico, mantener como string
+                if is_pk:
+                    df[col] = [str(x) if x is not None else '' for x in series]
+                else:
+                    null_strings = {'nan', 'NaN', 'None', 'null', 'NULL', '', 'na', 'NA'}
+                    df[col] = [None if str(x).strip() in null_strings else str(x) for x in series]
+        
+        # Para tipos numéricos pandas existentes
+        elif dtype.startswith(('int', 'Int')):
+            df[col] = clean_integer_column(df[col], is_primary_key=is_pk, column_name=col)
+        elif dtype.startswith(('float', 'Float')):
+            if is_pk:
+                df[col] = [0.0 if pd.isna(x) else float(x) for x in df[col]]
+            else:
+                df[col] = [None if pd.isna(x) else float(x) for x in df[col]]
     
     return df
 
 
 # --- MODIFICAR: preparación de filas a insertar ---
-def dataframe_to_clickhouse_rows(df: pd.DataFrame) -> tuple[list[tuple], list[str]]:
+def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, column_types: dict = None) -> tuple[list[tuple], list[str]]:
     """
     Convierte un DataFrame a (data, cols) para clickhouse_connect.client.insert,
     garantizando tipos nativos seguros para ClickHouse y limpiando valores raros.
     """
     # Preprocesar DataFrame para mejor manejo de nulos
-    df = preprocess_dataframe_for_clickhouse(df)
+    df = preprocess_dataframe_for_clickhouse(df, primary_keys, column_types)
     cols = list(df.columns)
 
     def cell(v):
         # None / NaN / NaT / string vacía
         if v is None:
             return None
+        
+        # Manejo de pandas NA/NaT/NaN con múltiples verificaciones
         try:
             if pd.isna(v):
                 return None
-        except Exception:
+        except (TypeError, ValueError):
             pass
+        
+        # Verificación específica para pandas._libs.missing.NAType
+        if str(type(v)).find('NAType') != -1:
+            return None
+            
         if isinstance(v, str) and v.strip() == "":
             return None
-        # Manejo específico para tipos nullable de pandas
-        if hasattr(v, '_is_scalar') and hasattr(v, '_isna'):
+            
+        # Manejo específico para tipos nullable de pandas con múltiples enfoques
+        if hasattr(v, '_isna'):
             try:
                 if v._isna:
                     return None
             except:
                 pass
+        
+        # Tipos pandas nullable (Int64, Float64, etc.)
+        if hasattr(v, 'dtype'):
+            dtype_str = str(v.dtype)
+            if dtype_str.startswith(('Int', 'UInt', 'Float')):
+                try:
+                    if pd.isna(v):
+                        return None
+                    return int(v) if dtype_str.startswith(('Int', 'UInt')) else float(v)
+                except:
+                    return None
         # pandas.Timestamp -> datetime (naive)
         if isinstance(v, pd.Timestamp):
             if v.tzinfo is not None:
@@ -444,7 +573,7 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame) -> tuple[list[tuple], list[st
             if v.as_tuple().exponent == 0:
                 return int(v)
             return str(v)
-        # Tipos numpy -> nativos
+        # Tipos numpy -> nativos (con debug logging para problemas de serialización)
         if isinstance(v, np.bool_):
             return bool(v)
         if isinstance(v, np.integer):
@@ -452,33 +581,69 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame) -> tuple[list[tuple], list[st
                 if pd.isna(v):
                     return None
                 int_val = int(v)
+                # Validación adicional de rango para Int32
                 if int_val < -2147483648 or int_val > 2147483647:
+                    log.warning(f"🚨 Valor numpy.integer fuera de rango Int32: {int_val} -> None")
                     return None
                 return int_val
-            except (ValueError, OverflowError):
+            except (ValueError, OverflowError, TypeError):
+                log.warning(f"🚨 Error convirtiendo numpy.integer: {repr(v)} -> None")
                 return None
         if isinstance(v, np.floating):
-            fv = float(v)
-            if math.isnan(fv) or math.isinf(fv):
+            try:
+                fv = float(v)
+                if math.isnan(fv) or math.isinf(fv):
+                    return None
+                # Si es un float que debería ser entero (ej: 123.0), convertirlo
+                if fv.is_integer() and -2147483648 <= fv <= 2147483647:
+                    return int(fv)
+                return fv
+            except (ValueError, OverflowError, TypeError):
+                log.warning(f"🚨 Error convirtiendo numpy.floating: {repr(v)} -> None")
                 return None
-            return fv
         # Manejo específico para tipos de pandas que pueden ser nulos
         if hasattr(v, 'dtype'):
-            if str(v.dtype).startswith('Int') or str(v.dtype).startswith('Float'):
+            dtype_str = str(v.dtype)
+            if dtype_str.startswith('Int') or dtype_str.startswith('Float') or dtype_str.startswith('int') or dtype_str.startswith('float'):
                 if pd.isna(v):
                     return None
                 try:
-                    result = int(v) if 'Int' in str(v.dtype) else float(v)
-                    if 'Int' in str(v.dtype) and (result < -2147483648 or result > 2147483647):
-                        return None
-                    return result
-                except (ValueError, OverflowError):
+                    if 'Int' in dtype_str or 'int' in dtype_str:
+                        result = int(v)
+                        if result < -2147483648 or result > 2147483647:
+                            log.warning(f"🚨 Valor pandas.Int fuera de rango Int32: {result} -> None")
+                            return None
+                        return result
+                    else:
+                        result = float(v)
+                        # Si es un float que debería ser entero (ej: 123.0), convertirlo
+                        if result.is_integer() and -2147483648 <= result <= 2147483647:
+                            return int(result)
+                        return result
+                except (ValueError, OverflowError, TypeError):
+                    log.warning(f"🚨 Error convirtiendo pandas dtype {dtype_str}: {repr(v)} -> None")
                     return None
-        # Validación adicional para enteros Python regulares
+        # Enteros Python regulares
         if isinstance(v, int):
+            # Validación de rango para Int32
             if v < -2147483648 or v > 2147483647:
+                log.warning(f"🚨 Valor int Python fuera de rango Int32: {v} -> None")
                 return None
             return v
+        
+        # Flotantes Python regulares
+        if isinstance(v, float):
+            if math.isnan(v) or math.isinf(v):
+                return None
+            # Si es un float que debería ser entero (ej: 123.0), convertirlo
+            if v.is_integer() and -2147483648 <= v <= 2147483647:
+                return int(v)
+            return v
+        
+        # Boolean Python
+        if isinstance(v, bool):
+            return int(v)
+        
         # Por defecto, devolver tal cual (dict/list se serializan aguas arriba si aplica)
         return v
 
@@ -564,16 +729,22 @@ def map_sqlalchemy_to_ch(ins: inspect, engine: Engine, schema: str, table: str) 
     """
     Refleja columnas de la tabla origen y regresa pares (nombre_col, tipo_clickhouse).
     Hacemos un mapeo razonable -> String, Nullable(String), Int32, Float64, DateTime, Decimal(18,0) etc.
+    IMPORTANTE: Los campos PRIMARY KEY se mantienen como NOT NULL.
     """
     cols = []
     try:
         cols_info = ins.get_columns(table, schema=schema)
+        # Obtener información de primary keys
+        pk_info = ins.get_pk_constraint(table, schema=schema)
+        primary_keys = set(pk_info.get('constrained_columns', [])) if pk_info else set()
+        
     except Exception as e:
         raise RuntimeError(f"No se pudieron leer columnas de {schema}.{table}: {e}") from e
 
     for c in cols_info:
         name = c["name"]
         type_ = str(c["type"]).lower()
+        is_primary_key = name in primary_keys
 
         # heurística simple de mapeo
         if "int" in type_:
@@ -598,11 +769,17 @@ def map_sqlalchemy_to_ch(ins: inspect, engine: Engine, schema: str, table: str) 
         else:
             ch_type = "String"
 
-        nullable = c.get("nullable", True)
+        # 🔑 IMPORTANTE: Los campos PRIMARY KEY nunca son nullable
+        nullable = c.get("nullable", True) and not is_primary_key
         if nullable and not ch_type.startswith("Nullable("):
             ch_type = f"Nullable({ch_type})"
 
         cols.append((name, ch_type))
+        
+        # Log para debugging
+        if is_primary_key:
+            log.info(f"Campo PRIMARY KEY detectado: {name} -> {ch_type} (NOT NULL)")
+    
     return cols
 
 
@@ -692,6 +869,8 @@ def insert_df(
     df: pd.DataFrame,
     unique_key: Optional[str] = None,
     drop_dupes_in_chunk: bool = True,
+    primary_keys: set = None,
+    column_types: dict = None,
 ) -> int:
     if df is None or df.empty:
         return 0
@@ -711,7 +890,7 @@ def insert_df(
         df = df.drop_duplicates(subset=[unique_key], keep="first")
 
     # 🔹 Convertir el DF a filas con datetime nativo/None garantizado
-    data, cols = dataframe_to_clickhouse_rows(df)
+    data, cols = dataframe_to_clickhouse_rows(df, primary_keys, column_types)
     client.insert(f"{database}.{table}", data, column_names=cols)
     return len(data)
 
@@ -816,14 +995,31 @@ def ingest_one_table(
         print(f"Tabla omitida {schema}.{table} → No existe o no es accesible en el origen.")
         return 0
 
-    # Mostrar estructura de la tabla
+    # Mostrar estructura de la tabla y obtener primary keys
+    primary_keys = set()
     try:
         ins = inspect(src_engine)
         cols_info = ins.get_columns(table, schema=schema)
+        
+        # Obtener primary keys
+        try:
+            pk_info = ins.get_pk_constraint(table, schema=schema)
+            primary_keys = set(pk_info.get('constrained_columns', [])) if pk_info else set()
+            if primary_keys:
+                log.info(f"Primary keys detectadas en {schema}.{table}: {primary_keys}")
+                print(f"Primary keys detectadas: {primary_keys}")
+        except Exception as pk_e:
+            log.warning(f"No se pudieron obtener primary keys de {schema}.{table}: {pk_e}")
+        
+        # Crear diccionario de tipos de columnas MySQL
+        column_types = {col['name']: str(col['type']) for col in cols_info}
+        
         print(f"Estructura de {schema}.{table}:")
         log.info(f"Estructura de {schema}.{table}:")
         for col in cols_info:
-            col_str = f"  - {col['name']}: {col['type']} (nullable={col.get('nullable', True)})"
+            is_pk = col['name'] in primary_keys
+            pk_indicator = " [PK]" if is_pk else ""
+            col_str = f"  - {col['name']}: {col['type']} (nullable={col.get('nullable', True)}){pk_indicator}"
             print(col_str)
             log.info(col_str)
     except Exception as e:
@@ -882,6 +1078,8 @@ def ingest_one_table(
                     chunk,
                     unique_key=unique_key,
                     drop_dupes_in_chunk=True,
+                    primary_keys=primary_keys,
+                    column_types=column_types,
                 )
                 inserted_total += n
                 log.info(
