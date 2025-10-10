@@ -212,9 +212,34 @@ services:
       - CLICKHOUSE_USER=superset
       - CLICKHOUSE_PASSWORD=Sup3rS3cret!
       - DB_CONNECTIONS=${DB_CONNECTIONS}
-    command: "bash -c 'echo \"🔧 Instalando dependencias...\" && pip install requests && echo \"� Iniciando configuración multi-database...\" && python /bootstrap/multi_database_configurator.py'"
+    command: "bash -c 'echo \"🔧 Instalando dependencias...\" && pip install requests && echo \"📊 Iniciando configuración multi-database...\" && python /bootstrap/multi_database_configurator.py'"
     networks:
-      - etl_network
+      - etl_net
+
+  # ---------- MULTI-DATABASE AUDITOR ----------
+  multi-db-auditor:
+    image: python:3.11-slim
+    container_name: multi-db-auditor
+    working_dir: /app
+    environment:
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_USER=auditor
+      - CLICKHOUSE_PASSWORD=Audit0r123!
+      - DB_CONNECTIONS=${DB_CONNECTIONS}
+    networks:
+      - etl_net
+    volumes:
+      - ./tools:/app/tools
+      - ./logs:/tmp/logs
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      clickhouse-setup:
+        condition: service_completed_successfully
+    command: "bash -c 'echo \"🔧 Instalando dependencias auditor...\" && pip install mysql-connector-python clickhouse-driver pymysql requests && echo \"🔍 Ejecutando auditoría multi-database...\" && python /app/tools/multi_database_auditor.py'"
+    profiles:
+      - audit  # Solo se ejecuta cuando se especifica el perfil audit
 
   # ---------- KAFKA (Confluent, KRaft 1 nodo combinado) ----------
   kafka:

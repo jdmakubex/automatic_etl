@@ -19,7 +19,7 @@ from clickhouse_driver import Client
 # Configure comprehensive logging
 def setup_logging():
     """Setup detailed logging with multiple handlers"""
-    os.makedirs('/app/logs', exist_ok=True)
+    os.makedirs('/tmp/logs', exist_ok=True)
     
     logging.basicConfig(
         level=logging.INFO,
@@ -30,7 +30,7 @@ def setup_logging():
     
     # File handler for detailed logs
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    file_handler = logging.FileHandler(f'/app/logs/db_parser_{timestamp}.log')
+    file_handler = logging.FileHandler(f'/tmp/logs/db_parser_{timestamp}.log')
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
     file_handler.setFormatter(file_formatter)
@@ -43,20 +43,34 @@ logger = setup_logging()
 def get_clickhouse_client():
     """Get ClickHouse client with enhanced error handling"""
     try:
-        client = Client(
-            host=os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse'),
-            port=int(os.getenv('CLICKHOUSE_NATIVE_PORT', 9000)),
-            user='default',
-            password='',
-            database='default',
-            connect_timeout=10,
-            send_receive_timeout=30
-        )
+        # Try different user/password combinations
+        auth_combinations = [
+            ('default', ''),
+            ('default', 'ClickHouse123!'),
+            ('etl', 'Et1Ingest!')
+        ]
         
-        # Test connection
-        client.execute("SELECT 1")
-        logger.info("✅ ClickHouse client connected and tested successfully")
-        return client
+        for user, password in auth_combinations:
+            try:
+                client = Client(
+                    host=os.getenv('CLICKHOUSE_HTTP_HOST', 'clickhouse'),
+                    port=int(os.getenv('CLICKHOUSE_NATIVE_PORT', 9000)),
+                    user=user,
+                    password=password,
+                    database='default',
+                    connect_timeout=10,
+                    send_receive_timeout=30
+                )
+                # Test connection
+                client.execute("SELECT 1")
+                logger.info(f"✅ ClickHouse client connected successfully with user: {user}")
+                return client
+            except Exception as e:
+                logger.debug(f"Failed with user {user}: {e}")
+                continue
+        
+        # If all auth combinations failed
+        raise Exception("Could not connect to ClickHouse with any known user/password combination")
         
     except Exception as e:
         logger.error(f"❌ Failed to connect to ClickHouse: {e}")

@@ -24,7 +24,7 @@ import time
 def setup_logging(log_level=logging.INFO):
     """Configura logging con múltiples niveles y archivos"""
     # Crear directorio de logs si no existe
-    os.makedirs('/app/logs', exist_ok=True)
+    os.makedirs('/tmp/logs', exist_ok=True)
     
     # Formatter detallado
     detailed_formatter = logging.Formatter(
@@ -43,13 +43,13 @@ def setup_logging(log_level=logging.INFO):
     
     # Handler para archivo general
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    file_handler = logging.FileHandler(f'/app/logs/multi_db_audit_{timestamp}.log')
+    file_handler = logging.FileHandler(f'/tmp/logs/multi_db_audit_{timestamp}.log')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(detailed_formatter)
     logger.addHandler(file_handler)
     
     # Handler para errores críticos
-    error_handler = logging.FileHandler(f'/app/logs/audit_errors_{timestamp}.log')
+    error_handler = logging.FileHandler(f'/tmp/logs/audit_errors_{timestamp}.log')
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(detailed_formatter)
     logger.addHandler(error_handler)
@@ -379,7 +379,7 @@ class MultiDatabaseAuditor:
     def generate_audit_report(self):
         """Genera reporte completo de auditoría"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        report_file = f"/app/logs/multi_db_audit_report_{timestamp}.json"
+        report_file = f"/tmp/logs/multi_db_audit_report_{timestamp}.json"
         
         # Calcular estadísticas globales
         self.audit_results["summary"] = {
@@ -399,7 +399,7 @@ class MultiDatabaseAuditor:
             self.logger.info(f"📋 Reporte guardado: {report_file}")
             
             # También guardar resumen ejecutivo
-            summary_file = f"/app/logs/audit_summary_{timestamp}.txt"
+            summary_file = f"/tmp/logs/audit_summary_{timestamp}.txt"
             with open(summary_file, 'w', encoding='utf-8') as f:
                 f.write("MULTI-DATABASE AUDIT SUMMARY\n")
                 f.write("=" * 50 + "\n\n")
