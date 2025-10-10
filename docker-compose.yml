@@ -105,7 +105,7 @@ services:
       timeout: 5s
       retries: 12
 
-  # ---------- CLICKHOUSE SETUP ROBUSTO ----------
+  # ---------- CLICKHOUSE MULTI-DATABASE SETUP ----------
   clickhouse-setup:
     build:
       context: ./bootstrap
@@ -116,6 +116,7 @@ services:
       - etl_net
     environment:
       - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
       - CLICKHOUSE_NATIVE_PORT=9000
       - CH_USER=etl
       - CH_PASSWORD=Et1Ingest!
@@ -123,6 +124,7 @@ services:
       - DB_CONNECTIONS=${DB_CONNECTIONS}
     volumes:
       - ./bootstrap:/app:ro
+      - ./bootstrap:/bootstrap
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -194,28 +196,25 @@ services:
 
   # ---------- SUPERSET DATASET CONFIGURATOR ----------
   superset-datasets:
-    image: python:3.11-slim
+    image: apache/superset:latest
     container_name: superset-datasets
-    networks:
-      - etl_net
+    depends_on:
+      - superset
+      - clickhouse
+    volumes:
+      - ./superset_bootstrap:/bootstrap
     environment:
       - SUPERSET_URL=http://superset:8088
-      - SUPERSET_ADMIN=${SUPERSET_ADMIN:-admin}
-      - SUPERSET_PASSWORD=${SUPERSET_PASSWORD:-Admin123!}
-    volumes:
-      - ./superset_bootstrap:/bootstrap:ro
-    depends_on:
-      superset:
-        condition: service_healthy
-      superset-init:
-        condition: service_completed_successfully
-    entrypoint: ["bash", "-c"]
-    command: >
-      apt-get update -qq && apt-get install -y -qq curl &&
-      pip install requests &&
-      echo "Esperando 30 segundos para que Superset esté completamente listo..." &&
-      sleep 30 &&
-      python /bootstrap/configure_datasets.py
+      - SUPERSET_ADMIN=admin
+      - SUPERSET_PASSWORD=Admin123!
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_USER=superset
+      - CLICKHOUSE_PASSWORD=Sup3rS3cret!
+      - DB_CONNECTIONS=${DB_CONNECTIONS}
+    command: "bash -c 'echo \"🔧 Instalando dependencias...\" && pip install requests && echo \"� Iniciando configuración multi-database...\" && python /bootstrap/multi_database_configurator.py'"
+    networks:
+      - etl_network
 
   # ---------- KAFKA (Confluent, KRaft 1 nodo combinado) ----------
   kafka:

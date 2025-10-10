@@ -1,15 +1,17 @@
 FROM python:3.11-slim
 
-
 RUN apt-get update && apt-get install -y \
     bash \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/logs
 
 WORKDIR /app
 
 COPY parse_db_connections.py /app/parse_db_connections.py
+COPY generate_multi_databases.py /bootstrap/generate_multi_databases.py
+COPY setup_multi_clickhouse.sh /bootstrap/setup_multi_clickhouse.sh
 
 RUN pip install clickhouse-driver
 
-CMD ["python", "/app/parse_db_connections.py"]
+CMD ["bash", "/bootstrap/setup_multi_clickhouse.sh"]
