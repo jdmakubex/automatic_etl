@@ -341,16 +341,57 @@ def coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# --- NUEVO: Preprocesamiento de DataFrame para ClickHouse ---
+def preprocess_dataframe_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Preprocesa el DataFrame para asegurar compatibilidad con ClickHouse,
+    especialmente en el manejo de valores nulos en columnas numéricas.
+    """
+    df = df.copy()
+    
+    for col in df.columns:
+        dtype = df[col].dtype
+        # Si la columna es object, puede tener strings numéricos
+        if dtype == 'object':
+            # Convertir strings numéricos a número, vacíos a NaN
+            cleaned = df[col].replace(r'^\s*$', pd.NA, regex=True)
+            numeric_series = pd.to_numeric(cleaned, errors='coerce')
+            # Si la mayoría son enteros, usar Int64; si hay decimales, usar Float64
+            try:
+                non_null_values = numeric_series.dropna()
+                if len(non_null_values) > 0 and (non_null_values % 1 == 0).all():
+                    df[col] = numeric_series.astype('Int64')
+                else:
+                    df[col] = numeric_series.astype('Float64')
+            except:
+                df[col] = cleaned
+        elif str(dtype).startswith('int'):
+            try:
+                df[col] = df[col].astype('Int64')
+            except:
+                pass
+        elif str(dtype).startswith('float'):
+            try:
+                df[col] = df[col].astype('Float64')
+            except:
+                pass
+    return df
+    
+    return df
+
+
 # --- MODIFICAR: preparación de filas a insertar ---
 def dataframe_to_clickhouse_rows(df: pd.DataFrame) -> tuple[list[tuple], list[str]]:
     """
     Convierte un DataFrame a (data, cols) para clickhouse_connect.client.insert,
     garantizando tipos nativos seguros para ClickHouse y limpiando valores raros.
     """
+    # Preprocesar DataFrame para mejor manejo de nulos
+    df = preprocess_dataframe_for_clickhouse(df)
     cols = list(df.columns)
 
     def cell(v):
-        # None / NaN / NaT
+        # None / NaN / NaT / string vacía
         if v is None:
             return None
         try:
@@ -358,63 +399,86 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame) -> tuple[list[tuple], list[st
                 return None
         except Exception:
             pass
-
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        # Manejo específico para tipos nullable de pandas
+        if hasattr(v, '_is_scalar') and hasattr(v, '_isna'):
+            try:
+                if v._isna:
+                    return None
+            except:
+                pass
         # pandas.Timestamp -> datetime (naive)
         if isinstance(v, pd.Timestamp):
             if v.tzinfo is not None:
                 v = v.tz_localize(None)
             return v.to_pydatetime()
-
         # numpy.datetime64 -> datetime (naive)
         if isinstance(v, np.datetime64):
             ts = pd.Timestamp(v)
             if ts.tzinfo is not None:
                 ts = ts.tz_localize(None)
             return ts.to_pydatetime()
-
         # date -> datetime (00:00:00)
         if isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
             return datetime.datetime(v.year, v.month, v.day)
-
         # datetime (naive)
         if isinstance(v, datetime.datetime):
             if v.tzinfo is not None:
                 v = v.replace(tzinfo=None)
             return v
-
         # Cadenas "fecha cero" típicas de MySQL -> None
         if isinstance(v, str):
             vs = v.strip()
             if vs in ("0000-00-00", "0000-00-00 00:00:00"):
                 return None
             return v  # otras strings se mandan tal cual
-
         # Bytes -> str (utf-8, tolerante)
         if isinstance(v, (bytes, bytearray)):
             try:
                 return v.decode("utf-8", errors="replace")
             except Exception:
                 return bytes(v)
-
         # Decimal → entero si es escala 0; en otro caso, a string (para no perder precisión)
         if isinstance(v, decimal.Decimal):
             if v.as_tuple().exponent == 0:
-                # Decimal(18,0) → int, perfecto para ClickHouse Decimal(18,0)
                 return int(v)
-            # Para decimales con parte fraccional, mejor str (ClickHouse castea sin perder precisión)
             return str(v)
-
         # Tipos numpy -> nativos
         if isinstance(v, np.bool_):
             return bool(v)
         if isinstance(v, np.integer):
-            return int(v)
+            try:
+                if pd.isna(v):
+                    return None
+                int_val = int(v)
+                if int_val < -2147483648 or int_val > 2147483647:
+                    return None
+                return int_val
+            except (ValueError, OverflowError):
+                return None
         if isinstance(v, np.floating):
             fv = float(v)
             if math.isnan(fv) or math.isinf(fv):
                 return None
             return fv
-
+        # Manejo específico para tipos de pandas que pueden ser nulos
+        if hasattr(v, 'dtype'):
+            if str(v.dtype).startswith('Int') or str(v.dtype).startswith('Float'):
+                if pd.isna(v):
+                    return None
+                try:
+                    result = int(v) if 'Int' in str(v.dtype) else float(v)
+                    if 'Int' in str(v.dtype) and (result < -2147483648 or result > 2147483647):
+                        return None
+                    return result
+                except (ValueError, OverflowError):
+                    return None
+        # Validación adicional para enteros Python regulares
+        if isinstance(v, int):
+            if v < -2147483648 or v > 2147483647:
+                return None
+            return v
         # Por defecto, devolver tal cual (dict/list se serializan aguas arriba si aplica)
         return v
 
@@ -887,6 +951,65 @@ def list_tables(engine: Engine, schemas: List[str]) -> List[Tuple[str, str]]:
     return out
 
 
+def run_audit(mysql_url: str, ch_database: str):
+    """Ejecuta auditoría comparando registros entre MySQL y ClickHouse"""
+    try:
+        import clickhouse_connect
+        
+        # Conectar a MySQL
+        mysql_engine = create_engine(mysql_url)
+        with mysql_engine.connect() as conn:
+            mysql_tables = conn.execute("SHOW TABLES").fetchall()
+        mysql_tables = [row[0] for row in mysql_tables]
+        
+        # Conectar a ClickHouse
+        ch_host = os.getenv("CH_HOST", "clickhouse")
+        ch_port = int(os.getenv("CH_PORT", "8123"))
+        ch_user = os.getenv("CH_USER", "etl")
+        ch_pass = os.getenv("CH_PASSWORD", "")
+        ch_client = clickhouse_connect.get_client(host=ch_host, port=ch_port, username=ch_user, password=ch_pass)
+        
+        log.info(f"{'Tabla':40} | {'MySQL':>10} | {'ClickHouse':>12} | {'Diferencia':>12}")
+        log.info("-" * 80)
+        
+        total_mysql = 0
+        total_ch = 0
+        
+        for table in mysql_tables:
+            # Contar registros en MySQL
+            try:
+                mysql_count = pd.read_sql(f"SELECT COUNT(*) as n FROM `{table}`", mysql_url)['n'][0]
+            except Exception:
+                mysql_count = 0
+            
+            # Contar registros en ClickHouse
+            ch_table = f"{ch_database}.src__default__archivos__{table}"
+            try:
+                ch_count = ch_client.query(f"SELECT COUNT(*) FROM {ch_table}").result_rows[0][0]
+            except Exception:
+                ch_count = 0
+            
+            diff = ch_count - mysql_count
+            log.info(f"{table:40} | {mysql_count:>10} | {ch_count:>12} | {diff:>12}")
+            
+            total_mysql += mysql_count
+            total_ch += ch_count
+        
+        log.info("-" * 80)
+        total_diff = total_ch - total_mysql
+        log.info(f"{'TOTAL':40} | {total_mysql:>10} | {total_ch:>12} | {total_diff:>12}")
+        
+        if total_diff == 0:
+            log.info(f"✅ Auditoría exitosa: {total_mysql} registros migrados correctamente")
+        else:
+            log.warning(f"⚠️  Diferencia: {total_diff} registros")
+            
+    except ImportError:
+        log.warning("clickhouse_connect no disponible para auditoría")
+    except Exception as e:
+        log.warning(f"Error en auditoría: {e}")
+
+
 # ---------------------------------
 # CLI
 # ---------------------------------
@@ -1006,6 +1129,13 @@ def main():
             failed_tables.append({"table": full, "error": str(e), "type": "unexpected"})
 
     log.info(f"== INGESTA TERMINADA == Filas insertadas totales: {total_rows}")
+    
+    # Ejecutar auditoría automática al final
+    try:
+        log.info("Ejecutando auditoría MySQL → ClickHouse...")
+        run_audit(source_url, args.ch_database)
+    except Exception as e:
+        log.warning(f"Error en auditoría: {e}")
     
     if failed_tables:
         log.warning(f"⚠ {len(failed_tables)} tabla(s) con errores:")
