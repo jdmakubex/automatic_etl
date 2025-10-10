@@ -302,37 +302,46 @@ class MasterETLAgent:
             return False
     
     def phase_3_ingest_data(self) -> bool:
-        """Fase 3: Ingesta de datos desde las fuentes configuradas"""
+        """Fase 3: Ejecutar ingesta de datos"""
         phase_start = datetime.now()
         self.logger.info("📊 === FASE 3: INGESTA DE DATOS ===")
         
         try:
             self.logger.info("🔄 Ejecutando ingesta de datos con ingest_runner...")
-            
-            # Ejecutar ingesta de datos
             ingestion_process = subprocess.run([
-                'docker-compose', 'run', '--rm', 'etl-tools', 
-                'python', 'tools/ingest_runner.py'
-            ], capture_output=True, text=True, timeout=600)  # 10 minutos timeout
+                'python3', 'tools/ingest_runner.py'
+            ], capture_output=True, text=True, timeout=300)
             
             ingestion_success = ingestion_process.returncode == 0
+            tables_created = 0  # Default
+            
+            # Leer el reporte de estado de ingesta si existe
+            ingest_status = None
+            try:
+                with open('logs/ingest_status.json', 'r', encoding='utf-8') as f:
+                    ingest_status = json.load(f)
+                    ingestion_success = ingest_status.get('success', ingestion_success)
+                    tables_created = ingest_status.get('successful_tables', 0)
+                    self.logger.info(f"📋 Reporte de ingesta leído: {ingest_status.get('total_rows', 0)} filas, {tables_created} tablas exitosas")
+            except Exception as e:
+                self.logger.warning(f"No se pudo leer logs/ingest_status.json: {e}")
             
             if ingestion_success:
                 self.logger.info("✅ FASE 3 COMPLETADA: Datos ingresados exitosamente")
-                # Contar tablas creadas revisando el output
-                output_lines = ingestion_process.stdout.split('\n')
-                tables_created = len([line for line in output_lines if 'tabla creada' in line.lower() or 'table created' in line.lower()])
                 self.logger.info(f"📊 Tablas procesadas: {tables_created}")
             else:
                 self.logger.error("❌ FASE 3 FALLÓ: Error en ingesta de datos")
                 self.logger.error(f"   Error: {ingestion_process.stderr}")
+                if ingest_status and ingest_status.get('failed_tables'):
+                    self.logger.error(f"   Tablas fallidas: {len(ingest_status['failed_tables'])}")
                 
             self.results['phases']['phase_3_ingestion'] = {
                 'name': 'Ingesta de Datos',
                 'success': ingestion_success,
                 'duration_seconds': (datetime.now() - phase_start).total_seconds(),
                 'output': ingestion_process.stdout if ingestion_success else ingestion_process.stderr,
-                'tables_processed': tables_created if ingestion_success else 0
+                'tables_processed': tables_created if ingestion_success else 0,
+                'ingest_details': ingest_status
             }
             
             return ingestion_success
@@ -353,24 +362,43 @@ class MasterETLAgent:
         self.logger.info("📊 === FASE 4: CONFIGURACIÓN COMPLETA DE SUPERSET ===")
         
         try:
-            success, superset_results = self.superset_configurator.comprehensive_superset_setup()
+            # Ejecutar orquestación de Superset-ClickHouse
+            self.logger.info("🔄 Ejecutando orquestación Superset-ClickHouse...")
+            superset_process = subprocess.run([
+                'docker-compose', 'exec', '-T', 'superset', 
+                'python3', '/bootstrap/orchestrate_superset_clickhouse.py'
+            ], capture_output=True, text=True, timeout=180)
+            
+            success = superset_process.returncode == 0
+            
+            # Leer el reporte de estado de Superset si existe
+            superset_status = None
+            try:
+                # El reporte se guarda en /tmp/logs dentro del contenedor, que está mapeado a logs/
+                with open('logs/superset_status.json', 'r', encoding='utf-8') as f:
+                    superset_status = json.load(f)
+                    success = superset_status.get('success', success)
+                    self.logger.info(f"📋 Reporte de Superset leído: {superset_status.get('databases_count', 0)} bases de datos configuradas")
+            except Exception as e:
+                self.logger.warning(f"No se pudo leer logs/superset_status.json: {e}")
             
             self.results['phases']['phase_4_superset'] = {
                 'name': 'Configuración de Superset',
                 'success': success,
                 'duration_seconds': (datetime.now() - phase_start).total_seconds(),
-                'details': superset_results
+                'output': superset_process.stdout if success else superset_process.stderr,
+                'superset_details': superset_status
             }
             
             if success:
                 self.logger.info("✅ FASE 4 COMPLETADA: Superset configurado")
-                self.logger.info(f"🌐 URL: {self.superset_configurator.superset_url}")
-                self.logger.info(f"👤 Admin: {self.superset_configurator.admin_config['username']}")
-                self.logger.info(f"📊 Datasets: {len(superset_results.get('datasets_created', []))}")
+                self.logger.info("🌐 URL: http://localhost:8088")
+                self.logger.info("👤 Admin: admin")
+                if superset_status:
+                    self.logger.info(f"📊 Bases de datos: {superset_status.get('databases_count', 0)}")
             else:
                 self.logger.error("❌ FASE 4 FALLÓ: Problemas configurando Superset")
-                for issue in superset_results.get('issues', [])[:3]:
-                    self.logger.error(f"   • {issue}")
+                self.logger.error(f"   Error: {superset_process.stderr}")
             
             return success
             
@@ -423,28 +451,43 @@ class MasterETLAgent:
             self.logger.info("🔄 Verificando si Kafka está disponible...")
             self._auto_start_kafka_services()
             
-            # Ejecutar validación ETL completa
-            self.logger.info("🔍 Validando flujo MySQL → Kafka → ClickHouse...")
-            validation_process = subprocess.run([
-                'python3', 'tools/validate_etl_simple.py'
+            # Ejecutar auditoría multi-database
+            self.logger.info("🔍 Ejecutando auditoría multi-database...")
+            audit_process = subprocess.run([
+                'docker-compose', 'exec', '-T', 'multi-db-auditor',
+                'python', '/app/tools/multi_database_auditor.py'
             ], capture_output=True, text=True, timeout=120)
             
-            pipeline_success = validation_process.returncode == 0
+            audit_success = audit_process.returncode == 0
+            
+            # Leer el reporte de estado de auditoría si existe
+            audit_status = None
+            try:
+                with open('logs/audit_status.json', 'r', encoding='utf-8') as f:
+                    audit_status = json.load(f)
+                    audit_success = audit_status.get('success', audit_success)
+                    success_rate = audit_status.get('success_rate', 0)
+                    self.logger.info(f"📋 Reporte de auditoría leído: {success_rate:.1f}% de éxito")
+            except Exception as e:
+                self.logger.warning(f"No se pudo leer logs/audit_status.json: {e}")
             
             self.results['phases']['phase_5_pipeline'] = {
                 'name': 'Validación Pipeline ETL',
-                'success': pipeline_success,
+                'success': audit_success,
                 'duration_seconds': (datetime.now() - phase_start).total_seconds(),
-                'validation_output': validation_process.stdout if pipeline_success else validation_process.stderr,
+                'validation_output': audit_process.stdout if audit_success else audit_process.stderr,
+                'audit_details': audit_status,
                 'kafka_auto_started': True
             }
             
-            if pipeline_success:
+            if audit_success:
                 self.logger.info("✅ FASE 5 COMPLETADA: Pipeline ETL operativo")
+                if audit_status:
+                    self.logger.info(f"📊 Auditoría: {audit_status.get('passed_tests', 0)}/{audit_status.get('total_tests', 0)} tests exitosos")
             else:
-                self.logger.warning(f"⚠️  Validación ETL con advertencias: {validation_process.stderr}")
+                self.logger.warning(f"⚠️  Validación ETL con advertencias: {audit_process.stderr}")
             
-            return pipeline_success
+            return audit_success
             
         except Exception as e:
             self.logger.error(f"❌ Error crítico en Fase 5: {str(e)}")

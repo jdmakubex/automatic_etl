@@ -95,6 +95,7 @@ services:
       - CLICKHOUSE_USER=default
     ports:
       - "8123:8123"     # HTTP
+      - "9000:9000"     # Native TCP (para Python driver)
     volumes:
       - ./bootstrap:/app:ro
       - ./bootstrap/clickhouse_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro

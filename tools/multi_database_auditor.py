@@ -461,6 +461,44 @@ class MultiDatabaseAuditor:
         # Generar reporte
         self.generate_audit_report()
         
+        # Calcular métricas de resumen
+        success_rate = 0
+        if self.audit_results['total_tests'] > 0:
+            success_rate = (self.audit_results['passed_tests'] / self.audit_results['total_tests']) * 100
+        
+        # Determinar estado global de éxito
+        global_success = (
+            self.audit_results['databases_audited'] > 0 and
+            success_rate >= 80  # 80% o más de tests exitosos se considera éxito
+        )
+        
+        # Escribir reporte de estado para orquestador externo
+        audit_status = {
+            "success": global_success,
+            "databases_audited": self.audit_results['databases_audited'],
+            "total_tests": self.audit_results['total_tests'],
+            "passed_tests": self.audit_results['passed_tests'],
+            "failed_tests": self.audit_results['failed_tests'],
+            "success_rate": success_rate,
+            "timestamp": self.audit_results['timestamp'],
+            "database_details": {
+                name: {
+                    "status": db_data.get("overall_status", "unknown"),
+                    "tests_passed": db_data.get("tests_passed", 0),
+                    "tests_total": db_data.get("tests_total", 0)
+                }
+                for name, db_data in self.audit_results["databases"].items()
+            }
+        }
+        
+        try:
+            os.makedirs('/tmp/logs', exist_ok=True)
+            with open('/tmp/logs/audit_status.json', 'w', encoding='utf-8') as f:
+                json.dump(audit_status, f, indent=2, ensure_ascii=False)
+            self.logger.info("📋 Reporte de estado guardado: /tmp/logs/audit_status.json")
+        except Exception as e:
+            self.logger.warning(f"No se pudo escribir /tmp/logs/audit_status.json: {e}")
+        
         self.logger.info("\n" + "=" * 70)
         self.logger.info("📊 RESUMEN FINAL DE AUDITORÍA")
         self.logger.info("=" * 70)
@@ -468,10 +506,8 @@ class MultiDatabaseAuditor:
         self.logger.info(f"Tests totales ejecutados: {self.audit_results['total_tests']}")
         self.logger.info(f"Tests exitosos: {self.audit_results['passed_tests']}")
         self.logger.info(f"Tests fallidos: {self.audit_results['failed_tests']}")
-        
-        if self.audit_results['total_tests'] > 0:
-            success_rate = (self.audit_results['passed_tests'] / self.audit_results['total_tests']) * 100
-            self.logger.info(f"Tasa de éxito: {success_rate:.1f}%")
+        self.logger.info(f"Tasa de éxito: {success_rate:.1f}%")
+        self.logger.info(f"Estado global: {'✅ EXITOSO' if global_success else '❌ REQUIERE ATENCIÓN'}")
         
         return self.audit_results
 

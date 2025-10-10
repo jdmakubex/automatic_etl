@@ -1335,6 +1335,26 @@ def main():
     except Exception as e:
         log.warning(f"Error en auditoría: {e}")
     
+    # Escribir reporte de estado para orquestador externo
+    status_report = {
+        "success": len(failed_tables) == 0,
+        "total_rows": total_rows,
+        "failed_tables": failed_tables,
+        "successful_tables": len(all_pairs) - len(failed_tables),
+        "total_tables": len(all_pairs),
+        "source_name": args.source_name,
+        "ch_database": args.ch_database,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+    }
+    
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/ingest_status.json", "w", encoding="utf-8") as f:
+            json.dump(status_report, f, indent=2, ensure_ascii=False)
+        log.info(f"📋 Reporte de estado guardado: logs/ingest_status.json")
+    except Exception as e:
+        log.warning(f"No se pudo escribir logs/ingest_status.json: {e}")
+    
     if failed_tables:
         log.warning(f"⚠ {len(failed_tables)} tabla(s) con errores:")
         for ft in failed_tables:
