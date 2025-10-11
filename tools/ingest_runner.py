@@ -1181,7 +1181,7 @@ def run_audit(mysql_url: str, ch_database: str):
                 mysql_count = 0
             
             # Contar registros en ClickHouse
-            ch_table = f"{ch_database}.src__default__archivos__{table}"
+                ch_table = f"{ch_database}.archivos_{table}"
             try:
                 ch_count = ch_client.query(f"SELECT COUNT(*) FROM {ch_table}").result_rows[0][0]
             except Exception:

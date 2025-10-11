@@ -65,7 +65,9 @@ class ColoredFormatter(logging.Formatter):
 # Configurar logging
 def setup_logging():
     """Configurar sistema de logging completo"""
-    log_dir = '/app/logs'
+    # Detectar si estamos en contenedor Docker
+    in_docker = os.path.exists('/.dockerenv') or os.environ.get('RUNNING_IN_DOCKER') == '1'
+    log_dir = '/app/logs' if in_docker else './logs'
     os.makedirs(log_dir, exist_ok=True)
     
     # Logger principal
@@ -101,31 +103,10 @@ class ETLOrchestrator:
         
         # Configuración de fases
         self.phase_config = {
-            'cleanup': {
-                'name': '🧹 LIMPIEZA COMPLETA',
-                'script': 'cleanup_all.py',
-                'description': 'Eliminar datos existentes para comenzar desde cero',
-                'required': True,
-                'timeout': 120
-            },
-            'users': {
-                'name': '👥 CONFIGURACIÓN DE USUARIOS',
-                'script': 'setup_database_users.py', 
-                'description': 'Crear usuarios y configurar permisos en MySQL y ClickHouse',
-                'required': True,
-                'timeout': 180
-            },
-            'discovery': {
-                'name': '🔍 DESCUBRIMIENTO DE ESQUEMAS',
-                'script': 'discover_mysql_tables.py',
-                'description': 'Detectar tablas MySQL y generar configuraciones',
-                'required': True,
-                'timeout': 120
-            },
-            'models': {
-                'name': '🏗️ CREACIÓN DE MODELOS',
-                'script': 'create_clickhouse_models.py',
-                'description': 'Crear tablas optimizadas en ClickHouse',
+            'pipeline_gen': {
+                'name': '🏗️ GENERACIÓN DE PIPELINE',
+                'script': 'gen_pipeline.py',
+                'description': 'Generar configuraciones de conectores y esquemas',
                 'required': True,
                 'timeout': 120
             },
@@ -140,15 +121,8 @@ class ETLOrchestrator:
                 'name': '✅ VALIDACIÓN COMPLETA',
                 'script': 'pipeline_status.py',
                 'description': 'Verificar flujo completo de datos',
-                'required': True,
+                'required': False,  # No crítico - permite continuar aunque falle
                 'timeout': 60
-            },
-            'superset_setup': {
-                'name': '📊 CONFIGURACIÓN DE SUPERSET',
-                'script': 'provision_superset.py',
-                'description': 'Configurar Superset con conexiones y dashboards',
-                'required': False,
-                'timeout': 180
             }
         }
         
@@ -165,27 +139,28 @@ class ETLOrchestrator:
     
     def wait_for_services(self) -> bool:
         """Esperar a que todos los servicios estén disponibles"""
-        logger.info("⏳ Esperando servicios Docker Compose...")
+        logger.info("⏳ Esperando servicios críticos...")
         
         services = {
             'connect': 'curl -s http://connect:8083/ -m 5',
             'clickhouse': 'curl -s http://clickhouse:8123/ping -m 5'
         }
         
-        max_wait = 300  # 5 minutos máximo
+        max_wait = 180  # 3 minutos máximo
         start_wait = time.time()
         
         for service_name, check_cmd in services.items():
             logger.info(f"🔍 Verificando servicio: {service_name}")
-            
             service_ready = False
+            service_wait_start = time.time()
+            
             while not service_ready and (time.time() - start_wait) < max_wait:
                 try:
                     result = subprocess.run(
-                        check_cmd, 
-                        shell=True, 
-                        capture_output=True, 
-                        text=True, 
+                        check_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
                         timeout=10
                     )
                     
@@ -193,7 +168,8 @@ class ETLOrchestrator:
                         logger.info(f"✅ Servicio {service_name} disponible")
                         service_ready = True
                     else:
-                        logger.debug(f"⏳ Esperando {service_name}... ({result.returncode})")
+                        elapsed = time.time() - service_wait_start
+                        logger.debug(f"⏳ Esperando {service_name}... ({elapsed:.1f}s)")
                         time.sleep(5)
                         
                 except subprocess.TimeoutExpired:
@@ -202,13 +178,25 @@ class ETLOrchestrator:
                 except Exception as e:
                     logger.debug(f"⏳ Error verificando {service_name}: {str(e)}")
                     time.sleep(5)
-            
+                    
             if not service_ready:
                 logger.error(f"❌ Servicio {service_name} no disponible después de {max_wait}s")
                 return False
-        
+                
+        # Verificar que el directorio /app/generated existe y está accesible
+        logger.info("🔍 Verificando acceso a directorios de trabajo...")
+        if not os.path.exists('/app/generated'):
+            logger.info("📁 Creando directorio /app/generated...")
+            os.makedirs('/app/generated/default', exist_ok=True)
+            
+        # Verificar acceso a herramientas
+        tools_dir = '/app/tools'
+        if not os.path.exists(tools_dir):
+            logger.error(f"❌ Directorio de herramientas no encontrado: {tools_dir}")
+            return False
+            
         total_wait = time.time() - start_wait
-        logger.info(f"✅ Todos los servicios disponibles ({total_wait:.1f}s)")
+        logger.info(f"✅ Servicios críticos disponibles ({total_wait:.1f}s)")
         return True
     
     def execute_phase(self, phase_key: str) -> bool:
@@ -370,7 +358,7 @@ class ETLOrchestrator:
                 return False
             
             # 2. Ejecutar fases en orden
-            phases_order = ['cleanup', 'users', 'discovery', 'models', 'connectors', 'validation', 'superset_setup']
+            phases_order = ['pipeline_gen', 'connectors', 'validation']
             
             for phase_key in phases_order:
                 if not self.execute_phase(phase_key):

@@ -16,6 +16,12 @@ import logging
 import subprocess
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Cargar variables de entorno del archivo .env
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
 
 class SupersetAutoConfigurator:
     """Configurador automático completo de Superset"""

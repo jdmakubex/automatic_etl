@@ -98,6 +98,7 @@ def write_json_schema(schema, table, cols, dir_schemas):
     p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def connector_payload(conn_name, conn, include_list):
+    # Usar variables de entorno del .env para configuración de Debezium
     prefix = os.getenv("DBZ_SERVER_NAME_PREFIX","dbserver")
     server_name = f"{prefix}_{conn_name}"
     history_suffix = os.getenv("DBZ_HISTORY_TOPIC", "schema-changes")
@@ -106,25 +107,37 @@ def connector_payload(conn_name, conn, include_list):
     decimal_mode = os.getenv("DBZ_DECIMAL_MODE","string")
     binary_mode = os.getenv("DBZ_BINARY_MODE","base64")
     time_precision = os.getenv("DBZ_TIME_PRECISION","connect")
+    
+    # Usar configuración específica de MySQL desde .env si está disponible
+    db_hostname = os.getenv("DBZ_DATABASE_HOSTNAME", conn["host"])
+    db_port = os.getenv("DBZ_DATABASE_PORT", str(conn["port"]))
+    db_user = os.getenv("DBZ_DATABASE_USER", conn["user"])
+    db_password = os.getenv("DBZ_DATABASE_PASSWORD", conn["pass"])
+    kafka_brokers = os.getenv("KAFKA_BROKERS", "kafka:9092")
+    schema_history_topic = os.getenv("SCHEMA_HISTORY_INTERNAL_KAFKA_TOPIC", history_topic)
+    schema_history_brokers = os.getenv("SCHEMA_HISTORY_INTERNAL_KAFKA_BOOTSTRAP_SERVERS", kafka_brokers)
 
     payload = {
         "name": server_name,
         "config": {
             "connector.class": "io.debezium.connector.mysql.MySqlConnector",
-            "database.hostname": conn["host"],
-            "database.port": str(conn["port"]),
-            "database.user": conn["user"],
-            "database.password": conn["pass"],
+            "database.hostname": db_hostname,
+            "database.port": db_port,
+            "database.user": db_user,
+            "database.password": db_password,
             "database.server.id": str(5400 + abs(hash(conn_name)) % 1000),
             "database.server.name": server_name,
+            "topic.prefix": server_name,
             "table.include.list": include_list,
             "include.schema.changes": "false",
             "decimal.handling.mode": decimal_mode,
             "binary.handling.mode": binary_mode,
             "time.precision.mode": time_precision,
             "snapshot.mode": snapshot_mode,
-            "database.history.kafka.bootstrap.servers": os.getenv("KAFKA_BROKERS","kafka-1:9092,kafka-2:9092,kafka-3:9092"),
-            "database.history.kafka.topic": history_topic,
+            "database.history.kafka.bootstrap.servers": kafka_brokers,
+            "database.history.kafka.topic": schema_history_topic,
+            "schema.history.internal.kafka.bootstrap.servers": schema_history_brokers,
+            "schema.history.internal.kafka.topic": schema_history_topic,
             "database.history.skip.unparseable.ddl": "true"
         }
     }
@@ -132,7 +145,7 @@ def connector_payload(conn_name, conn, include_list):
 
 def write_ch_raw_script(conn_name, tables, out_dir):
     ch_db = os.getenv("CLICKHOUSE_DATABASE","fgeo_analytics")
-    brokers = os.getenv("KAFKA_BROKERS","kafka-1:9092,kafka-2:9092,kafka-3:9092")
+    brokers = os.getenv("KAFKA_BROKERS","kafka:9092")
     prefix = os.getenv("DBZ_SERVER_NAME_PREFIX","dbserver")
     sh = ["#!/usr/bin/env bash", "set -euo pipefail"]
     sh.append(f'DB="{ch_db}"')

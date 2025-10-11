@@ -79,6 +79,11 @@ class MasterETLAgent:
         self.start_time = datetime.now()
         self.execution_id = self.start_time.strftime('%Y%m%d_%H%M%S')
         
+        # Ejecutar pre-validación para autonomía
+        if not self._run_pre_validation():
+            self.logger.error("❌ Pre-validación falló. Sistema no listo para ejecución autónoma.")
+            sys.exit(2)
+        
         # Auto-instalar dependencias si es necesario
         self._ensure_dependencies()
         
@@ -528,26 +533,68 @@ class MasterETLAgent:
             self.logger.error(f"❌ Error en validación ETL: {str(e)}")
             return False
     
-    def _ensure_dependencies(self):
-        """Asegurar que todas las dependencias están instaladas"""
+    def _run_pre_validation(self) -> bool:
+        """Ejecutar pre-validación para autonomía completa"""
+        self.logger.info("🛡️ Ejecutando pre-validación para autonomía...")
+        
         try:
-            if not hasattr(self, 'logger'):
-                self.logger = logging.getLogger('MasterETLAgent')
-            self.logger.info("🔧 Verificando dependencias automáticamente...")
+            # Ejecutar el script de pre-validación
+            result = subprocess.run([
+                sys.executable, 'tools/pre_validation.py'
+            ], capture_output=True, text=True, timeout=60)
             
-            # Instalar requirements si es necesario
-            if os.path.exists('tools/requirements.txt'):
-                subprocess.run([
-                    'pip', 'install', '-r', 'tools/requirements.txt'
-                ], capture_output=True, text=True, timeout=60)
-            elif os.path.exists('requirements.txt'):
-                subprocess.run([
-                    'pip', 'install', '-r', 'requirements.txt'
-                ], capture_output=True, text=True, timeout=60)
+            if result.returncode == 0:
+                self.logger.info("✅ Pre-validación exitosa - Sistema listo para autonomía")
+                return True
+            else:
+                self.logger.error("❌ Pre-validación falló:")
+                if result.stderr:
+                    self.logger.error(f"   Error: {result.stderr}")
+                if result.stdout:
+                    self.logger.info(f"   Detalles: {result.stdout}")
+                return False
                 
+        except subprocess.TimeoutExpired:
+            self.logger.error("❌ Pre-validación tomó demasiado tiempo")
+            return False
         except Exception as e:
-            # No es crítico si falla
-            pass
+            self.logger.error(f"❌ Error ejecutando pre-validación: {e}")
+            return False
+    
+    def _read_existing_json_reports(self):
+        """Leer reportes JSON existentes para contexto"""
+        try:
+            # Leer reporte de ingesta si existe
+            ingest_status_path = 'logs/ingest_status.json'
+            if os.path.exists(ingest_status_path):
+                with open(ingest_status_path, 'r', encoding='utf-8') as f:
+                    ingest_data = json.load(f)
+                    self.logger.info(f"📄 Reporte de ingesta leído: {ingest_data.get('summary', 'N/A')}")
+            
+            # Leer reporte de auditoría si existe  
+            audit_status_path = 'logs/audit_status.json'
+            if os.path.exists(audit_status_path):
+                with open(audit_status_path, 'r', encoding='utf-8') as f:
+                    audit_data = json.load(f)
+                    success_rate = audit_data.get('success_rate', 0)
+                    self.logger.info(f"📄 Reporte de auditoría leído: {success_rate:.1f}% éxito")
+                    
+        except Exception as e:
+            self.logger.warning(f"⚠️  No se pudieron leer reportes JSON existentes: {e}")
+    
+    def _ensure_dependencies(self):
+        """Instalar dependencias automáticamente si es necesario"""
+        try:
+            import requests
+            self.logger.info("✅ Dependencias verificadas")
+        except ImportError:
+            self.logger.info("📦 Instalando dependencias automáticamente...")
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 'requests'], 
+                             check=True, capture_output=True)
+                self.logger.info("✅ Dependencias instaladas exitosamente")
+            except subprocess.CalledProcessError as e:
+                self.logger.warning(f"⚠️  No se pudieron instalar dependencias automáticamente: {e}")
     
     def _execute_phase_with_retry(self, phase_name: str, phase_function, max_retries: int = 2) -> bool:
         """Ejecutar una fase con reintentos automáticos"""
@@ -700,6 +747,16 @@ class MasterETLAgent:
         self.logger.info(f"🆔 ID de Ejecución: {self.execution_id}")
         
         try:
+            # PASO 0: Pre-validación para autonomía
+            if not self._run_pre_validation():
+                self.logger.error("❌ PIPELINE ABORTADO: Pre-validación falló")
+                return False
+            
+            self._ensure_dependencies()
+            
+            # Leer reportes JSON si existen
+            self._read_existing_json_reports()
+            
             # Fase 1: Validar infraestructura (con reintentos)
             phase1_success = self._execute_phase_with_retry(
                 "Fase 1 - Infraestructura", 

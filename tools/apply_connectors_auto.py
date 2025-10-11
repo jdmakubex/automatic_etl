@@ -2,6 +2,7 @@
 """
 Script para aplicar conectores de Debezium automáticamente
 Espera a que Connect esté listo y aplica todos los conectores configurados
+Usa configuración centralizada del archivo .env
 """
 import requests
 import json
@@ -9,11 +10,19 @@ import time
 import os
 import sys
 import glob
+from pathlib import Path
+from dotenv import load_dotenv
 
+# Cargar variables de entorno del archivo .env
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+
+# Configuración desde variables de entorno
 CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
-CONNECTORS_PATH = "generated/default"
-MAX_RETRIES = 30
-RETRY_DELAY = 10
+DEBEZIUM_CONNECT_URL = os.getenv("DEBEZIUM_CONNECT_URL", CONNECT_URL)
+CONNECTORS_PATH = os.getenv("GENERATED_DIR", "generated") + "/default"
+MAX_RETRIES = int(os.getenv("HEALTH_CHECK_RETRIES", "30"))
+RETRY_DELAY = int(os.getenv("HEALTH_CHECK_INTERVAL", "10s").rstrip('s'))
 
 def wait_for_connect():
     """Espera a que Connect esté disponible"""
@@ -56,9 +65,10 @@ def apply_connector(connector_file):
             print(f"⚠️  Conector {connector_name} ya existe, saltando...")
             return True
         
-        # Aplicar conector
+        # Aplicar conector usando la URL correcta
+        connect_service_url = DEBEZIUM_CONNECT_URL or CONNECT_URL
         response = requests.post(
-            f"{CONNECT_URL}/connectors",
+            f"{connect_service_url}/connectors",
             headers={"Content-Type": "application/json"},
             json=connector_config,
             timeout=10

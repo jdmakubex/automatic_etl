@@ -41,6 +41,7 @@ services:
         condition: service_healthy
       connect:
         condition: service_healthy
+    command: ["python3", "tools/orchestrate_etl_init.py"]
     healthcheck:
       test: ["CMD-SHELL", "test -d /app/tools && python3 --version || exit 1"]
       interval: 10s
@@ -60,17 +61,15 @@ services:
       - CLICKHOUSE_URL=http://clickhouse:8123
       - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fgeo_analytics}
       - DB_CONNECTIONS=${DB_CONNECTIONS}
+      - PYTHONUNBUFFERED=1
     networks:
       - etl_net
     volumes:
       - ./tools:/app/tools
       - ./logs:/app/logs
+      - ./generated:/app/generated
     user: "1000:1000"
-    entrypoint: ["bash","-lc"]
-    command: >
-      set -euo pipefail;
-      python tools/gen_pipeline.py;
-      bash generated/default/ch_create_raw_pipeline.sh;
+    entrypoint: ["/bin/bash", "-c", "mkdir -p /app/generated/default && chmod -R 777 /app/generated && python3 /app/tools/gen_pipeline.py && tail -f /dev/null"]
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -88,11 +87,16 @@ services:
     container_name: clickhouse
     networks:
       - etl_net
+    env_file:
+      - .env
     environment:
       - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fgeo_analytics}
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
       - CLICKHOUSE_PASSWORD=ClickHouse123!
       - CLICKHOUSE_USER=default
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_NATIVE_PORT=9000
     ports:
       - "8123:8123"     # HTTP
       - "9000:9000"     # Native TCP (para Python driver)
@@ -109,12 +113,15 @@ services:
   # ---------- CLICKHOUSE MULTI-DATABASE SETUP ----------
   clickhouse-setup:
     build:
-      context: ./bootstrap
-      dockerfile: Dockerfile.clickhouse-setup
-    image: clickhouse-setup:latest
+      context: .
+      dockerfile: tools/Dockerfile.pipeline-gen
+    image: etl-tools:latest
     container_name: clickhouse-setup
+    working_dir: /app
     networks:
       - etl_net
+    env_file:
+      - .env
     environment:
       - CLICKHOUSE_HTTP_HOST=clickhouse
       - CLICKHOUSE_HTTP_PORT=8123
@@ -124,12 +131,13 @@ services:
       - CH_DB=fgeo_analytics
       - DB_CONNECTIONS=${DB_CONNECTIONS}
     volumes:
-      - ./bootstrap:/app:ro
-      - ./bootstrap:/bootstrap
+      - ./tools:/app/tools
+      - ./bootstrap:/app/bootstrap:ro
+      - ./logs:/app/logs
     depends_on:
       clickhouse:
         condition: service_healthy
-    entrypoint: python3 /app/parse_db_connections.py
+    command: ["python3", "tools/setup_clickhouse_complete.py"]
 
   # ---------- SUPERSET ----------
   superset:
@@ -178,22 +186,32 @@ services:
 
   # ---------- SUPERSET INIT ----------
   superset-init:
-    image: apache/superset:3.1.0
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.pipeline-gen
+    image: etl-tools:latest
     container_name: superset-init
+    working_dir: /app
     networks:
       - etl_net
+    env_file:
+      - .env
     environment:
+      - SUPERSET_URL=http://superset:8088
       - SUPERSET_ADMIN=${SUPERSET_ADMIN:-admin}
       - SUPERSET_PASSWORD=${SUPERSET_PASSWORD:-Admin123!}
-      - SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fgeo_analytics}
     volumes:
+      - ./tools:/app/tools
       - ./superset_bootstrap:/bootstrap:ro
+      - ./logs:/app/logs
     depends_on:
       superset:
         condition: service_healthy
       etl-orchestrator:
         condition: service_completed_successfully
-    entrypoint: ["/bootstrap/init_superset.sh"]
+    command: ["python3", "tools/superset_auto_configurator.py"]
 
   # ---------- SUPERSET DATASET CONFIGURATOR ----------
   superset-datasets:
@@ -417,23 +435,12 @@ services:
       - ./tools:/app/tools
       - ./generated:/app/generated
       - ./logs:/app/logs
-    user: "1000:1000"
     depends_on:
-      connect:
-        condition: service_healthy
       clickhouse:
         condition: service_healthy
-      clickhouse-setup:
-        condition: service_completed_successfully
-      kafka:
+      connect:
         condition: service_healthy
-    command: ["python", "tools/ingest_runner.py"]
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /app/logs/ingest.log && echo 'Ingesta completada' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
+    command: ["python3", "tools/orchestrate_etl_init.py"]
 
   # ---------- APLICACIÓN AUTOMÁTICA DE CONECTORES (LEGACY - Mantenido para compatibilidad) ----------
   connector-applier:

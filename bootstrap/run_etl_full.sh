@@ -249,15 +249,14 @@ done
 # para evitar dependencias externas y asegurar que la configuración se realiza
 # directamente en el contenedor de ClickHouse.
 #
-# El script debe estar accesible en /app/bootstrap/setup_clickhouse_robust.sh
+# El script debe estar accesible en /app/setup_clickhouse_robust.sh
 # (montado por volumen compartido). Si falla, se documenta en el log y se aborta.
 log_info "Ejecutando inicialización robusta de ClickHouse desde el contenedor..."
-if docker exec clickhouse bash /app/bootstrap/setup_clickhouse_robust.sh 2>&1 | tee -a logs/etl_full.log; then
+if docker exec clickhouse bash /app/setup_clickhouse_robust.sh 2>&1 | tee -a logs/etl_full.log; then
   log_info "✓ Inicialización robusta de ClickHouse completada"
 else
   handle_fatal_error "Falló la inicialización robusta de ClickHouse (ver logs/etl_full.log)"
 fi
-done
 
 # Si hay servicios no saludables, advertir pero continuar
 if [ ${#UNHEALTHY_SERVICES[@]} -gt 0 ]; then
@@ -381,7 +380,7 @@ docker compose run --rm pipeline-gen bash /app/generated/default/ch_create_raw_p
 
 # Ejecutar ingesta de datos en ClickHouse
 echo "[ETL] Ejecutando ingesta de datos en ClickHouse..." | tee -a logs/etl_full.log
-docker compose run --rm etl-tools python tools/ingest_runner.py --source-url=mysql+pymysql://juan.marcos:123456@172.21.61.53:3306/archivos --ch-database=fgeo_analytics --ch-prefix=src__default__ --schemas archivos --chunksize 50000 --truncate-before-load --dedup none | tee -a logs/etl_full.log
+docker compose run --rm etl-tools python tools/ingest_runner.py --source-url=mysql+pymysql://juan.marcos:123456@172.21.61.53:3306/archivos --ch-database=fgeo_analytics --ch-prefix=archivos_ --schemas archivos --chunksize 50000 --truncate-before-load --dedup none | tee -a logs/etl_full.log
 
 # Validar tablas y filas en ClickHouse
 printf "\n[ETL] Tablas en ClickHouse (fgeo_analytics):\n" | tee -a logs/etl_full.log

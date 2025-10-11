@@ -11,3 +11,5 @@ RUN apt-get update && apt-get install -y \
     bash \
     curl \
     && rm -rf /var/lib/apt/lists/*
+# Robustecer: crear directorios requeridos y establecer permisos
+RUN mkdir -p /app/logs /app/generated && chmod 777 /app/logs /app/generated
