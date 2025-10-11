@@ -2,6 +2,31 @@
 Producción: MySQL 5.5 → Debezium (Connect HA) → Kafka (KRaft RF=3) → ClickHouse → Superset.
 Sigue el README del chat: pasos 1–7. Este paquete incluye el docker-compose COMPLETO y scripts listos.
 
+## 🤖 Agente de Ciclo Automático ETL
+
+**NUEVO:** Sistema completamente autónomo que ejecuta ciclos de validación, ajuste y ejecución del pipeline ETL hasta lograr éxito completo **sin intervención del usuario**.
+
+```bash
+# Ejecutar ciclo automático de validación y ajuste
+python tools/auto_etl_cycle_agent.py
+
+# Con opciones avanzadas
+python tools/auto_etl_cycle_agent.py --max-iterations 10 --debug
+```
+
+**Características:**
+- ✅ Commit automático del estado actual
+- ✅ Limpieza completa de contenedores y datos
+- ✅ Ejecución completa del orquestador ETL
+- ✅ Validación automática de resultados y logs
+- ✅ Detección y ajuste automático de errores
+- ✅ Iteración hasta lograr éxito completo
+- ✅ Reportes detallados en JSON
+
+Ver documentación completa: [docs/AUTO_ETL_CYCLE_AGENT.md](docs/AUTO_ETL_CYCLE_AGENT.md)
+
+---
+
 # ETL FGEO — Stack ClickHouse + Superset (WSL/Windows)
 **Fecha:** 2025-09-23
 
