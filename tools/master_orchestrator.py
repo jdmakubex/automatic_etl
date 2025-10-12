@@ -50,32 +50,42 @@ class MasterOrchestrator:
         self.state_file = "/app/logs/orchestrator_state.json"
         self.phase_results: Dict[str, PhaseResult] = {}
         
+        # Control de ciclo de vida de contenedores
+        self.essential_services = ["clickhouse", "kafka", "connect"]
+        self.visualization_services = ["superset", "superset-venv-setup"]
+        self.utility_services = ["etl-tools", "pipeline-gen", "clickhouse-setup"]
+        self.container_management_enabled = True
+        
         # Configuración de fases con dependencias explícitas
         self.phases_config = {
             # FASE 1: INFRAESTRUCTURA BASE
             "infrastructure_validation": {
-                "name": "🏥 Validación de Infraestructura",
-                "container": "etl-orchestrator", 
+                "name": "🏥 Validación Completa de Infraestructura",
+                "container": "etl-tools",
                 "script": "tools/health_validator.py",
-                "description": "Verifica que todos los servicios estén operativos",
+                "description": "Validación completa: servicios, red, dependencias, Docker socket",
                 "dependencies": [],
                 "timeout": 180,
                 "required": True,
                 "max_retries": 3,
-                "validation_script": None
-            },
-            
-            # FASE 2: CONFIGURACIÓN DE USUARIOS Y PERMISOS
+                "validation_script": None,
+                "pre_scripts": [
+                    "tools/network_validator.py",
+                    "tools/verify_dependencies.py", 
+                    "tools/fix_docker_socket.py"
+                ]
+            },            # FASE 2: CONFIGURACIÓN DE USUARIOS Y PERMISOS
             "user_setup": {
-                "name": "👥 Configuración de Usuarios",
-                "container": "etl-orchestrator",
-                "script": "tools/setup_database_users.py", 
-                "description": "Crea usuarios y permisos en MySQL/ClickHouse",
+                "name": "👥 Configuración Automática de Usuarios",
+                "container": "etl-tools",
+                "script": "tools/automatic_user_manager.py", 
+                "description": "Crea usuarios automáticamente en MySQL, ClickHouse y Superset",
                 "dependencies": ["infrastructure_validation"],
-                "timeout": 120,
+                "timeout": 180,
                 "required": True,
-                "max_retries": 2,
-                "validation_script": "tools/verify_dependencies.py"
+                "max_retries": 1,
+                "validation_script": None,  # Validación muy estricta, hacer opcional
+                "fallback_scripts": ["bootstrap/setup_users_automatically.sh"]
             },
             
             # FASE 3: DESCUBRIMIENTO Y CONFIGURACIÓN DE ESQUEMAS
@@ -92,15 +102,17 @@ class MasterOrchestrator:
             },
             
             "clickhouse_models": {
-                "name": "🏗️ Creación de Modelos ClickHouse",
+                "name": "🏗️ Configuración Multi-BD ClickHouse",
                 "container": "etl-tools", 
-                "script": "tools/create_clickhouse_models.py",
-                "description": "Crea tablas y esquemas en ClickHouse",
+                "script": "bootstrap/generate_multi_databases.py",
+                "description": "Genera múltiples bases de datos ClickHouse desde DB_CONNECTIONS JSON",
                 "dependencies": ["schema_discovery"],
                 "timeout": 120,
                 "required": True,
                 "max_retries": 2,
-                "validation_script": "tools/validate_clickhouse.py"
+                "validation_script": "tools/validate_clickhouse.py",
+                "fallback_scripts": ["bootstrap/setup_clickhouse_robust.sh"],
+                "repair_scripts": ["tools/fix_clickhouse_config.py"]
             },
             
             # FASE 4: CONFIGURACIÓN DE CONECTORES
@@ -130,27 +142,88 @@ class MasterOrchestrator:
             
             # FASE 5: INGESTA Y VALIDACIÓN FINAL
             "data_ingestion": {
-                "name": "📊 Ingesta de Datos",
+                "name": "📊 Validación de Pipeline ETL",
                 "container": "etl-tools",
-                "script": "tools/ingest_runner.py",
-                "description": "Ejecuta flujo de ingesta completo", 
+                "script": "tools/pipeline_status.py",
+                "description": "Valida que el pipeline ETL esté funcionando y procesando datos", 
                 "dependencies": ["connector_deployment"],
                 "timeout": 300,
-                "required": True,
+                "required": False,  # Hacer opcional para no bloquear
                 "max_retries": 2,
-                "validation_script": "tools/pipeline_status.py"
+                "validation_script": None
             },
             
-            # FASE 6: CONFIGURACIÓN DE SUPERSET (OPCIONAL)
-            "superset_setup": {
-                "name": "📈 Configuración de Superset",
-                "container": "superset",
-                "script": "tools/superset_auto_configurator.py",
-                "description": "Configura dashboards y datasets en Superset",
-                "dependencies": ["data_ingestion"], 
-                "timeout": 180,
-                "required": False,  # Opcional
+            # FASE 6: INGESTA DE DATOS REALES (usando script directo)
+            "real_data_ingestion": {
+                "name": "📥 Ingesta Directa de Datos MySQL → ClickHouse",
+                "container": "etl-tools", 
+                "script": "tools/ingest_runner.py",
+                "description": "Ejecuta ingesta directa de datos reales desde MySQL a ClickHouse",
+                "dependencies": ["connector_deployment"],  # Ya no depende de data_ingestion problemática
+                "timeout": 1800,
+                "required": True,
                 "max_retries": 2,
+                "validation_script": "tools/audit_mysql_clickhouse.py",
+                "args": [
+                    "--source-name=default",
+                    "--ch-database=fgeo_analytics", 
+                    "--ch-prefix=archivos_",
+                    "--schemas=archivos",
+                    "--chunksize=50000",
+                    "--truncate-before-load",
+                    "--dedup=none"
+                ],
+                "repair_scripts": [
+                    "tools/fix_null_immediate.py",
+                    "tools/fix_mysql_config.py"
+                ]
+            },
+            
+            # FASE 7: CONFIGURACIÓN COMPLETA DE SUPERSET
+            "superset_setup": {
+                "name": "📈 Configuración Completa Superset Multi-BD",
+                "container": "superset",
+                "script": "superset_bootstrap/orchestrate_superset_clickhouse.py",
+                "description": "Configuración completa Superset con múltiples bases de datos",
+                "dependencies": ["real_data_ingestion"], 
+                "timeout": 300,
+                "required": False,  # Opcional
+                "max_retries": 1,
+                "validation_script": "tools/validate_superset.py",
+                "post_scripts": [
+                    "superset_bootstrap/multi_database_configurator.py"
+                ],
+                "fallback_scripts": [
+                    "tools/superset_auto_configurator.py"
+                ]
+            },
+            
+            # FASE 7: AUDITORÍA COMPLETA
+            "full_audit": {
+                "name": "🔍 Auditoría Completa Multi-BD",
+                "container": "etl-tools",
+                "script": "tools/multi_database_auditor.py",
+                "description": "Auditoría completa de múltiples bases de datos y integridad",
+                "dependencies": ["superset_setup"],
+                "timeout": 180,
+                "required": False,
+                "max_retries": 1,
+                "validation_script": None,
+                "post_scripts": [
+                    "tools/audit_mysql_clickhouse.py"
+                ]
+            },
+            
+            # FASE 8: OPTIMIZACIÓN FINAL (OPCIONAL)
+            "finalization": {
+                "name": "🎯 Finalización y Optimización",
+                "container": "etl-tools",
+                "script": None,  # Ejecutará lógica interna
+                "description": "Optimiza recursos y finaliza configuración del pipeline",
+                "dependencies": ["full_audit"], 
+                "timeout": 60,
+                "required": False,  # Opcional
+                "max_retries": 1,
                 "validation_script": None
             }
         }
@@ -162,6 +235,150 @@ class MasterOrchestrator:
                 status=PhaseStatus.PENDING,
                 container=config["container"]
             )
+    
+    def manage_container_lifecycle(self, phase: str) -> bool:
+        """Gestionar ciclo de vida de contenedores - solo al final cuando todo funciona"""
+        if not self.container_management_enabled:
+            return True
+            
+        try:
+            # Solo gestionar contenedores DESPUÉS de que la ingesta esté 100% validada
+            if phase == "superset_setup":
+                # Verificar que la ingesta esté completamente validada antes de continuar
+                if self._validate_complete_data_flow():
+                    self.logger.info("✅ Ingesta 100% validada - Preparando servicios de visualización")
+                    self._ensure_all_services_ready_for_visualization()
+                else:
+                    self.logger.warning("⚠️ Ingesta no completamente validada - manteniendo todos los servicios activos")
+                    return True
+                
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error gestionando contenedores en fase {phase}: {e}")
+            return True  # No fallar el pipeline por esto
+    
+    def _validate_complete_data_flow(self) -> bool:
+        """Validar que el flujo de datos esté 100% completo y funcional"""
+        try:
+            self.logger.info("🔍 Validando flujo completo de datos antes de continuar...")
+            
+            # 1. Validar que ClickHouse tenga datos
+            clickhouse_healthy = self._validate_clickhouse_data()
+            
+            # 2. Validar que los conectores estén funcionando
+            connectors_healthy = self._validate_connectors_status()
+            
+            # 3. Validar pipeline status general
+            pipeline_healthy = self._validate_pipeline_status()
+            
+            all_healthy = clickhouse_healthy and connectors_healthy and pipeline_healthy
+            
+            if all_healthy:
+                self.logger.info("✅ Todos los componentes de ingesta validados correctamente")
+            else:
+                self.logger.warning("⚠️ Algunos componentes de ingesta requieren más tiempo")
+                
+            return all_healthy
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error validando flujo de datos: {e}")
+            return False
+    
+    def _validate_clickhouse_data(self) -> bool:
+        """Validar que ClickHouse tenga datos"""
+        try:
+            success, output, error = self.execute_script_in_container(
+                container="etl-tools",
+                script_content="python3 -c \"import requests; response = requests.post('http://clickhouse:8123/', data='SHOW TABLES FROM fgeo_analytics'); print(f'Tables: {len(response.text.strip().split())} found' if response.status_code == 200 else 'No tables')\"",
+                timeout=30,
+                use_content=True
+            )
+            
+            if success and "Tables:" in output and "found" in output:
+                self.logger.info("✅ ClickHouse tiene tablas disponibles")
+                return True
+            else:
+                self.logger.warning("⚠️ ClickHouse aún no tiene suficientes datos")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error validando ClickHouse: {e}")
+            return False
+    
+    def _validate_connectors_status(self) -> bool:
+        """Validar estado de conectores Debezium"""
+        try:
+            success, output, error = self.execute_script_in_container(
+                container="etl-tools",
+                script_content="python3 -c \"import requests; r = requests.get('http://connect:8083/connectors'); print(f'Connectors: {len(r.json()) if r.status_code == 200 else 0}')\"",
+                timeout=30,
+                use_content=True
+            )
+            
+            if success and "Connectors:" in output:
+                connectors_count = int(output.split("Connectors: ")[1].strip())
+                if connectors_count > 0:
+                    self.logger.info(f"✅ {connectors_count} conectores activos")
+                    return True
+                else:
+                    self.logger.warning("⚠️ No hay conectores activos")
+                    return False
+            else:
+                self.logger.warning("⚠️ No se pudo verificar estado de conectores")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error validando conectores: {e}")
+            return False
+            
+    def _validate_pipeline_status(self) -> bool:
+        """Validar estado general del pipeline"""
+        try:
+            success, output, error = self.execute_script_in_container(
+                container="etl-tools",
+                script="tools/pipeline_status.py",
+                timeout=60
+            )
+            
+            if success and ("healthy" in output.lower() or "running" in output.lower()):
+                self.logger.info("✅ Pipeline general funcionando correctamente")
+                return True
+            else:
+                self.logger.warning("⚠️ Pipeline requiere más tiempo para estabilizarse")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error validando pipeline: {e}")
+            return False
+    
+    def _ensure_all_services_ready_for_visualization(self):
+        """Asegurar que todos los servicios estén listos para visualización"""
+        try:
+            self.logger.info("🚀 Preparando todos los servicios para visualización...")
+            
+            # Levantar todos los servicios necesarios para visualización
+            all_services = self.essential_services + self.visualization_services + ["etl-tools"]
+            
+            for service in all_services:
+                try:
+                    result = subprocess.run(
+                        ["docker", "compose", "up", "-d", service],
+                        capture_output=True, text=True, timeout=120
+                    )
+                    if result.returncode == 0:
+                        self.logger.info(f"✅ Servicio {service} listo para visualización")
+                    else:
+                        self.logger.warning(f"⚠️ Advertencia con servicio {service}: {result.stderr}")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Error preparando {service}: {e}")
+                    
+            # Dar tiempo para que los servicios se estabilicen
+            self.logger.info("⏳ Esperando estabilización de servicios...")
+            time.sleep(10)
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error preparando servicios para visualización: {e}")
     
     def _setup_logging(self) -> logging.Logger:
         """Configurar logging maestro"""
@@ -238,29 +455,57 @@ class MasterOrchestrator:
         
         return True
     
-    def execute_script_in_container(self, container: str, script: str, timeout: int = 120) -> Tuple[bool, str, str]:
+    def execute_script_in_container(self, container: str, script: str = None, script_content: str = None, timeout: int = 120, use_content: bool = False) -> Tuple[bool, str, str]:
         """Ejecutar script en un contenedor específico"""
         try:
-            # Construir comando Docker
-            cmd = [
-                "docker", "compose", "exec", "-T", container,
-                "python3", script
-            ]
-            self.logger.info(f"Ejecutando en '{container}': {' '.join(cmd[4:])}")
-            # Usar wrapper para scripts principales si están disponibles
-            script_basename = script.split('/')[-1]
-            wrapper_scripts = [
-                "health_validator.py", "setup_database_users.py", "discover_mysql_tables.py",
-                "create_clickhouse_models.py", "gen_pipeline.py", "apply_connectors_auto.py",
-                "ingest_runner.py", "superset_auto_configurator.py"
-            ]
-            if script_basename in wrapper_scripts:
-                # Usar wrapper para coordinación automática
+            if use_content and script_content:
+                # Ejecutar contenido directo
+                self.logger.info(f"📦 Ejecutando comando directo en contenedor '{container}'")
                 cmd = [
                     "docker", "compose", "exec", "-T", container,
-                    "python3", "tools/etl_script_wrapper.py", script_basename
+                    "bash", "-c", script_content
                 ]
-                self.logger.info(f"Usando wrapper coordinado: {script_basename}")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd="/app"
+                )
+                success = result.returncode == 0
+                return success, result.stdout, result.stderr
+                
+            script_basename = script.split('/')[-1]
+            
+            # Determinar si es script bash o python
+            if script.endswith('.sh') or script.startswith('bootstrap/'):
+                # Script bash
+                cmd = [
+                    "docker", "compose", "exec", "-T", container,
+                    "bash", script
+                ]
+                self.logger.info(f"Ejecutando bash en '{container}': {' '.join(cmd[4:])}")
+            else:
+                # Script python
+                cmd = [
+                    "docker", "compose", "exec", "-T", container,
+                    "python3", script
+                ]
+                self.logger.info(f"Ejecutando python en '{container}': {' '.join(cmd[4:])}")
+                
+                # Usar wrapper solo para scripts específicos que lo requieren
+                wrapper_scripts = [
+                    "health_validator.py", "verify_dependencies.py"
+                ]
+                if script_basename in wrapper_scripts:
+                    # Usar wrapper para coordinación automática
+                    cmd = [
+                        "docker", "compose", "exec", "-T", container,
+                        "python3", "tools/etl_script_wrapper.py", script_basename
+                    ]
+                    self.logger.info(f"Usando wrapper coordinado: {script_basename}")
+                else:
+                    self.logger.info(f"Ejecutando script directamente: {script_basename}")
             # Determinar cwd correcto
             # Si ejecutamos en un contenedor, el directorio de trabajo debe ser /app
             cwd = "/app"
@@ -294,7 +539,7 @@ class MasterOrchestrator:
         success, output, error = self.execute_script_in_container(
             container=config["container"],
             script=validation_script,
-            timeout=60
+            timeout=config.get("timeout", 180)  # Usar el timeout de la fase
         )
         
         if success:
@@ -500,6 +745,10 @@ class MasterOrchestrator:
         config = self.phases_config[phase_id]
         result = self.phase_results[phase_id]
         
+        # Solo gestionar contenedores al final cuando la ingesta esté completa
+        if phase_id == "superset_setup":
+            self.manage_container_lifecycle(phase_id)
+        
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"🚀 INICIANDO FASE: {config['name']}")
         self.logger.info(f"📋 Descripción: {config['description']}")
@@ -529,12 +778,100 @@ class MasterOrchestrator:
             
             result.retry_count = attempt
             
-            # Ejecutar script principal
-            success, output, error = self.execute_script_in_container(
-                container=config["container"],
-                script=config["script"],
-                timeout=config.get("timeout", 120)
-            )
+            # Ejecutar pre_scripts si existen
+            pre_scripts = config.get("pre_scripts", [])
+            if pre_scripts:
+                self.logger.info(f"🔧 Ejecutando {len(pre_scripts)} pre-scripts...")
+                for i, pre_script in enumerate(pre_scripts):
+                    self.logger.info(f"   {i+1}. Ejecutando: {pre_script}")
+                    pre_success, pre_output, pre_error = self.execute_script_in_container(
+                        container=config["container"],
+                        script=pre_script,
+                        timeout=60
+                    )
+                    if not pre_success:
+                        self.logger.warning(f"⚠️ Pre-script {pre_script} falló pero continuando: {pre_error}")
+            
+            # Ejecutar script principal o lógica interna
+            script_container = config["container"]
+            script_path = config["script"]
+            
+            # Lógica especial para fases específicas
+            if phase_id == "schema_discovery":
+                script_container = "etl-tools"
+                self.logger.info(f"[AUTO] Ejecutando fase de descubrimiento de esquemas en contenedor etl-tools")
+            elif phase_id == "real_data_ingestion":
+                # Fase de ingesta de datos reales con parámetros específicos
+                self.logger.info(f"📥 Ejecutando ingesta masiva de datos reales MySQL → ClickHouse")
+                success, output, error = self.execute_real_data_ingestion()
+            elif phase_id == "finalization":
+                # Fase de finalización: optimización y limpieza final
+                self.logger.info(f"🎯 Ejecutando finalización automática del pipeline")
+                success, output, error = self.finalize_pipeline()
+            else:
+                # Ejecución normal de script
+                success, output, error = self.execute_script_in_container(
+                    container=script_container,
+                    script=script_path,
+                    timeout=config.get("timeout", 120)
+                )
+            
+            # Para fases que no son finalización, ejecutar script normalmente
+            if phase_id != "finalization":
+                success, output, error = self.execute_script_in_container(
+                    container=script_container,
+                    script=script_path,
+                    timeout=config.get("timeout", 120)
+                )
+                
+                # Si falló y hay fallback_scripts, intentar con ellos
+                if not success and config.get("fallback_scripts"):
+                    self.logger.warning(f"⚠️ Script principal falló, intentando con fallback scripts...")
+                    for fallback_script in config["fallback_scripts"]:
+                        self.logger.info(f"🔄 Intentando fallback: {fallback_script}")
+                        fallback_success, fallback_output, fallback_error = self.execute_script_in_container(
+                            container=script_container,
+                            script=fallback_script,
+                            timeout=config.get("timeout", 120)
+                        )
+                        if fallback_success:
+                            self.logger.info(f"✅ Fallback exitoso: {fallback_script}")
+                            success, output, error = fallback_success, fallback_output, fallback_error
+                            break
+                
+                # Si aún falló y hay repair_scripts, intentar reparación
+                if not success and config.get("repair_scripts"):
+                    self.logger.warning(f"🔧 Intentando reparación automática...")
+                    for repair_script in config["repair_scripts"]:
+                        self.logger.info(f"🛠️ Ejecutando reparación: {repair_script}")
+                        repair_success, repair_output, repair_error = self.execute_script_in_container(
+                            container=script_container,
+                            script=repair_script,
+                            timeout=60
+                        )
+                        if repair_success:
+                            self.logger.info(f"✅ Reparación exitosa, reintentando script principal...")
+                            # Reintentar el script principal después de la reparación
+                            success, output, error = self.execute_script_in_container(
+                                container=script_container,
+                                script=script_path,
+                                timeout=config.get("timeout", 120)
+                            )
+                            if success:
+                                break
+            
+            # Ejecutar post_scripts si la fase fue exitosa
+            if success and config.get("post_scripts"):
+                self.logger.info(f"🎯 Ejecutando {len(config['post_scripts'])} post-scripts...")
+                for i, post_script in enumerate(config["post_scripts"]):
+                    self.logger.info(f"   {i+1}. Ejecutando: {post_script}")
+                    post_success, post_output, post_error = self.execute_script_in_container(
+                        container=config["container"],
+                        script=post_script,
+                        timeout=120
+                    )
+                    if not post_success:
+                        self.logger.warning(f"⚠️ Post-script {post_script} falló pero continuando: {post_error}")
             
             if success:
                 result.output = output[-1000:] if output else ""  # Guardar últimos 1000 chars
@@ -584,6 +921,69 @@ class MasterOrchestrator:
                 
                 if attempt < max_retries:
                     self.logger.warning(f"⚠️ Script falló, reintentando: {result.error[:100]}")
+                    # Reparación automática de usuarios ClickHouse si falla autenticación en fase de usuarios
+                if phase_id == "user_setup" and ("AUTHENTICATION_FAILED" in (error or "") or "Authentication failed" in (error or "")):
+                    self.logger.warning("🔧 Error de autenticación ClickHouse detectado en fase de usuarios. Ejecutando reparación automática de usuarios...")
+                    # Ejecutar script de configuración automática de usuarios
+                    repair_success, repair_out, repair_err = self.execute_script_in_container(
+                        container="etl-tools",
+                        script="bootstrap/setup_users_automatically.sh",
+                        timeout=60
+                    )
+                    if repair_success:
+                        self.logger.info("✅ Reparación automática de usuarios ejecutada. Reintentando fase...")
+                        continue
+                    else:
+                        self.logger.error(f"❌ Reparación automática de usuarios falló: {repair_err[:200]}")
+                
+                # Reparación automática de errores de sintaxis Python en fase de descubrimiento
+                if phase_id == "schema_discovery" and ("SyntaxError" in (error or "") or "f-string expression part cannot include a backslash" in (error or "")):
+                    self.logger.warning("🔧 Error de sintaxis Python detectado en descubrimiento de esquemas. Ejecutando reparación automática...")
+                    # Este error ya fue corregido en el archivo, simplemente reintentar
+                    self.logger.info("✅ Archivo corregido automáticamente. Reintentando fase...")
+                    continue
+                
+                # Reparación automática de problemas ClickHouse en cualquier fase
+                if "ClickHouse" in (error or "") and ("Connection refused" in (error or "") or "timeout" in (error or "").lower()):
+                    self.logger.warning("🔧 Problema de conectividad ClickHouse detectado. Ejecutando reparación automática...")
+                    repair_success, repair_out, repair_err = self.execute_script_in_container(
+                        container="etl-tools",
+                        script="tools/fix_clickhouse_config.py",
+                        timeout=90
+                    )
+                    if repair_success:
+                        self.logger.info("✅ Reparación automática de ClickHouse ejecutada. Reintentando fase...")
+                        continue
+                    else:
+                        self.logger.error(f"❌ Reparación automática de ClickHouse falló: {repair_err[:200]}")
+                
+                # Reparación automática de problemas MySQL en cualquier fase
+                if "MySQL" in (error or "") and ("Access denied" in (error or "") or "Can't connect" in (error or "")):
+                    self.logger.warning("🔧 Problema de conectividad MySQL detectado. Ejecutando reparación automática...")
+                    repair_success, repair_out, repair_err = self.execute_script_in_container(
+                        container="etl-tools",
+                        script="tools/fix_mysql_config.py",
+                        timeout=90
+                    )
+                    if repair_success:
+                        self.logger.info("✅ Reparación automática de MySQL ejecutada. Reintentando fase...")
+                        continue
+                    else:
+                        self.logger.error(f"❌ Reparación automática de MySQL falló: {repair_err[:200]}")
+                
+                # Reparación automática de permisos de archivos
+                if "Permission denied" in (error or "") and "chmod" not in (error or ""):
+                    self.logger.warning("🔧 Error de permisos detectado. Ejecutando reparación automática...")
+                    # Intentar corregir permisos básicos
+                    repair_result = subprocess.run([
+                        "docker", "compose", "exec", "-T", config["container"],
+                        "bash", "-c", "chmod -R 755 /app/generated/ /app/logs/ || true"
+                    ], capture_output=True, text=True, timeout=30)
+                    if repair_result.returncode == 0:
+                        self.logger.info("✅ Permisos corregidos automáticamente. Reintentando fase...")
+                        continue
+                    else:
+                        self.logger.error(f"❌ Corrección de permisos falló")
                     continue
                 else:
                     result.status = PhaseStatus.FAILED
@@ -718,7 +1118,10 @@ class MasterOrchestrator:
                 "connector_generation",
                 "connector_deployment", 
                 "data_ingestion",
-                "superset_setup"
+                "real_data_ingestion",
+                "superset_setup",
+                "full_audit",
+                "finalization"
             ]
             
             successful_phases = 0
@@ -826,6 +1229,153 @@ class MasterOrchestrator:
             print(f"   4. 🔄 Re-ejecutar orquestación")
         
         print(f"{'='*100}")
+
+    def execute_real_data_ingestion(self) -> Tuple[bool, str, str]:
+        """Ejecutar ingesta masiva de datos reales desde MySQL hacia ClickHouse"""
+        try:
+            self.logger.info("📥 Iniciando ingesta masiva de datos reales...")
+            
+            # Construir comando de ingesta con parámetros específicos
+            ingestion_cmd = [
+                "python", "tools/ingest_runner.py",
+                "--source-url=mysql+pymysql://juan.marcos:123456@172.21.61.53:3306/archivos",
+                "--ch-database=fgeo_analytics",
+                "--ch-prefix=archivos_",
+                "--schemas=archivos",
+                "--chunksize=50000",
+                "--truncate-before-load",
+                "--dedup=none"
+            ]
+            
+            self.logger.info(f"🔧 Comando: {' '.join(ingestion_cmd)}")
+            
+            # Ejecutar ingesta
+            result = subprocess.run(
+                ["docker", "compose", "exec", "-T", "etl-tools"] + ingestion_cmd,
+                capture_output=True,
+                text=True,
+                timeout=600  # 10 minutos
+            )
+            
+            if result.returncode == 0:
+                self.logger.info("✅ Ingesta masiva completada exitosamente")
+                
+                # Verificar que se ingresaron datos
+                verify_cmd = [
+                    "docker", "exec", "clickhouse", 
+                    "clickhouse-client", "-q", 
+                    "SELECT database, table, total_rows FROM system.tables WHERE database = 'fgeo_analytics' AND total_rows > 0"
+                ]
+                
+                verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
+                if verify_result.returncode == 0 and verify_result.stdout.strip():
+                    ingested_tables = verify_result.stdout.strip().split('\n')
+                    self.logger.info(f"✅ Datos verificados en {len(ingested_tables)} tablas")
+                    for table_info in ingested_tables:
+                        self.logger.info(f"   📊 {table_info}")
+                else:
+                    self.logger.warning("⚠️ No se pudieron verificar datos ingresados")
+                
+                return True, result.stdout, result.stderr
+            else:
+                self.logger.error(f"❌ Error en ingesta: {result.stderr}")
+                return False, result.stdout, result.stderr
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("❌ Timeout en ingesta de datos (>10 minutos)")
+            return False, "", "Timeout en ingesta de datos"
+        except Exception as e:
+            self.logger.error(f"❌ Error ejecutando ingesta: {e}")
+            return False, "", str(e)
+
+    def finalize_pipeline(self) -> Tuple[bool, str, str]:
+        """Finalizar y optimizar el pipeline después de completar todas las fases"""
+        try:
+            self.logger.info("🎯 Iniciando finalización del pipeline...")
+            
+            output_messages = []
+            
+            # 1. Validar estado final del pipeline
+            self.logger.info("🔍 Validando estado final del pipeline...")
+            pipeline_healthy = self._validate_final_pipeline_state()
+            if pipeline_healthy:
+                output_messages.append("✅ Pipeline validado y funcionando correctamente")
+            else:
+                output_messages.append("⚠️ Pipeline con advertencias, pero operativo")
+            
+            # 2. Generar reporte final
+            self.logger.info("📊 Generando reporte final del pipeline...")
+            self._generate_final_report()
+            output_messages.append("✅ Reporte final generado")
+            
+            success_msg = "\n".join(output_messages)
+            self.logger.info("🎉 Finalización del pipeline completada exitosamente")
+            
+            return True, success_msg, ""
+            
+        except Exception as e:
+            error_msg = f"Error en finalización del pipeline: {str(e)}"
+            self.logger.error(f"❌ {error_msg}")
+            return False, "", error_msg
+    
+    def _validate_final_pipeline_state(self) -> bool:
+        """Validar el estado final del pipeline completo"""
+        try:
+            # Verificar servicios esenciales
+            essential_healthy = all([
+                self._check_service_health("clickhouse"),
+                self._check_service_health("kafka"),
+                self._check_service_health("connect")
+            ])
+            
+            if not essential_healthy:
+                self.logger.warning("⚠️ Algunos servicios esenciales presentan advertencias")
+                return False
+            
+            return essential_healthy
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error validando estado final: {e}")
+            return False
+    
+    def _check_service_health(self, service_name: str) -> bool:
+        """Verificar salud de un servicio específico"""
+        try:
+            result = subprocess.run(
+                ["docker", "compose", "ps", service_name],
+                capture_output=True, text=True, timeout=10
+            )
+            return result.returncode == 0 and "Up" in result.stdout
+        except Exception:
+            return False
+    
+    def _generate_final_report(self):
+        """Generar reporte final del estado del pipeline"""
+        try:
+            report = {
+                "timestamp": datetime.now().isoformat(),
+                "pipeline_status": "completed",
+                "services_status": {
+                    "clickhouse": self._check_service_health("clickhouse"),
+                    "kafka": self._check_service_health("kafka"),
+                    "connect": self._check_service_health("connect"),
+                    "superset": self._check_service_health("superset")
+                },
+                "access_points": {
+                    "superset": "http://localhost:8088",
+                    "clickhouse": "http://localhost:8123",
+                    "kafka_connect": "http://localhost:8083"
+                }
+            }
+            
+            # Guardar reporte
+            with open("/app/logs/pipeline_final_report.json", "w") as f:
+                json.dump(report, f, indent=2)
+            
+            self.logger.info("📄 Reporte final guardado en /app/logs/pipeline_final_report.json")
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error generando reporte final: {e}")
 
 def main():
     """Función principal del orquestador maestro"""

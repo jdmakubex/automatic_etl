@@ -54,15 +54,17 @@ fi
 execute_clickhouse_command() {
     local query="$1"
     echo "🔧 Ejecutando: $query"
-    
-    # Usar clickhouse-client desde el contenedor con timeout
-    timeout 30 clickhouse-client \
-        --host="$CLICKHOUSE_HTTP_HOST" \
-        --port="$CLICKHOUSE_NATIVE_PORT" \
-        --user="default" \
-        --password="$CLICKHOUSE_PASSWORD" \
-        --query="$query"
-    
+    # Usar curl HTTP para ejecutar comandos en ClickHouse
+    local user="${CLICKHOUSE_USER:-default}"
+    local pass="${CLICKHOUSE_PASSWORD:-}"
+    local host="${CLICKHOUSE_HTTP_HOST:-clickhouse}"
+    local port="${CLICKHOUSE_HTTP_PORT:-8123}"
+    local url="http://$host:$port/"
+    if [ -n "$pass" ]; then
+        curl -s -u "$user:$pass" -X POST "$url" -d "$query"
+    else
+        curl -s -X POST "$url" -d "$query"
+    fi
     local exit_code=$?
     if [ $exit_code -eq 0 ]; then
         echo "✅ Comando ejecutado exitosamente"
@@ -76,7 +78,7 @@ execute_clickhouse_command() {
 # [PASO 4] Verificar conectividad
 echo "🔗 Verificando conectividad con ClickHouse..."
 if ! execute_clickhouse_command "SELECT 1"; then
-    echo "❌ No se puede conectar a ClickHouse"
+    echo "❌ No se puede conectar a ClickHouse via HTTP"
     exit 1
 fi
 

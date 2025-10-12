@@ -214,6 +214,7 @@ services:
     volumes:
       - superset_home:/app/superset_home
       - ./superset_bootstrap:/bootstrap:ro
+      - ./generated/default/schemas:/app/generated/default/schemas:ro
     ports:
       - "8088:8088"
     depends_on:

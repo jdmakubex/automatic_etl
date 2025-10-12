@@ -243,8 +243,9 @@ class MySQLTableDiscovery:
                 order_by = columns[0]['name'] if columns else 'tuple()'
             
             # Crear DDL completo
+            columns_str = ',\n    '.join(column_definitions)
             ddl = f"""CREATE TABLE IF NOT EXISTS {table_name} (
-    {',\\n    '.join(column_definitions)}
+    {columns_str}
 ) ENGINE = MergeTree()
 ORDER BY ({order_by})
 SETTINGS index_granularity = 8192"""

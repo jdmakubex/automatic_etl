@@ -96,18 +96,34 @@ def main():
         sys.exit(1)
     
     # Buscar archivos de conectores
-    connector_files = glob.glob(f"{CONNECTORS_PATH}/*.json")
+    connector_files = [f for f in glob.glob(f"{CONNECTORS_PATH}/*.json")
+                       if not any(x in f for x in ["discovery_summary.json", "tables_metadata.json"])]
     if not connector_files:
-        print(f"⚠️  No se encontraron archivos de conectores en {CONNECTORS_PATH}")
+        print(f"⚠️  No se encontraron archivos de conectores válidos en {CONNECTORS_PATH}")
         sys.exit(0)
-    
-    print(f"Encontrados {len(connector_files)} archivos de conectores")
-    
+
+    print(f"Encontrados {len(connector_files)} archivos de conectores válidos")
+
     # Aplicar cada conector
     success_count = 0
     for connector_file in connector_files:
-        if apply_connector(connector_file):
-            success_count += 1
+        # Limpiar campos no válidos antes de aplicar
+        try:
+            with open(connector_file, 'r') as f:
+                connector_config = json.load(f)
+            # Eliminar discovery_timestamp si existe
+            if 'discovery_timestamp' in connector_config:
+                del connector_config['discovery_timestamp']
+            # Guardar el archivo limpio temporalmente
+            tmp_file = connector_file + '.tmp'
+            with open(tmp_file, 'w') as f:
+                json.dump(connector_config, f)
+            result = apply_connector(tmp_file)
+            os.remove(tmp_file)
+            if result:
+                success_count += 1
+        except Exception as e:
+            print(f"❌ Error limpiando/aplicando {connector_file}: {e}")
         time.sleep(2)  # Pausa entre aplicaciones
     
     print(f"\n=== RESUMEN ===")
