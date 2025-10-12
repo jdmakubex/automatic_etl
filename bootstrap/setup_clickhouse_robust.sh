@@ -107,13 +107,13 @@ SETTINGS profile = 'default'
 # [PASO 7] Otorgar permisos
 echo "🔐 Configurando permisos..."
 
-# Permisos para usuario ETL
-execute_clickhouse_command "GRANT ALL ON fgeo_default.* TO etl"
-execute_clickhouse_command "GRANT ALL ON fgeo_analytics.* TO etl"
+# Permisos GLOBALES para usuario ETL (para crear cualquier base de datos dinámicamente)
+execute_clickhouse_command "GRANT ALL ON *.* TO etl WITH GRANT OPTION"
 
 # Permisos para usuario Superset  
 execute_clickhouse_command "GRANT SELECT ON fgeo_default.* TO superset"
 execute_clickhouse_command "GRANT SELECT ON fgeo_analytics.* TO superset"
+execute_clickhouse_command "GRANT SELECT ON *.* TO superset"
 
 # [PASO 8] Parsear y procesar conexiones de base de datos
 echo "📊 Procesando conexiones de bases de datos..."

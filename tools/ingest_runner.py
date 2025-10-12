@@ -9,6 +9,7 @@ import sys
 import json
 import argparse
 import logging
+import re
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
@@ -221,20 +222,34 @@ def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
             if np.isnan(v):
                 return None
             return float(v)
-        # ✅ pandas Timestamp → datetime nativo (naive)
+        # ✅ pandas Timestamp → convertir a datetime object para ClickHouse
         if isinstance(v, (pd.Timestamp,)):
             # ya deberían venir sin tz
-            return None if pd.isna(v) else v.to_pydatetime()
-        # ✅ NUEVO: datetime.datetime → devolver como datetime (sin tz)
+            if pd.isna(v) or pd.isnull(v):
+                return None
+            try:
+                dt = v.to_pydatetime()
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                return dt
+            except (ValueError, AttributeError):
+                return None
+        # ✅ CORREGIDO: datetime.datetime → mantener como objeto datetime para ClickHouse
         elif isinstance(v, datetime.datetime):
-        # quitar tz si la hubiera
-            if v.tzinfo is not None:
-                v = v.replace(tzinfo=None)
-            return v
+            try:
+                # quitar tz si la hubiera
+                if v.tzinfo is not None:
+                    v = v.replace(tzinfo=None)
+                return v
+            except (ValueError, AttributeError):
+                return None
 
-        # ✅ NUEVO: datetime.date → elevar a datetime (00:00:00)
+        # ✅ CORREGIDO: datetime.date → convertir a datetime para ClickHouse
         elif isinstance(v, datetime.date):
-            return datetime.datetime(v.year, v.month, v.day)
+            try:
+                return datetime.datetime(v.year, v.month, v.day)
+            except (ValueError, AttributeError):
+                return None
         if isinstance(v, Decimal):
             # Para no perder precisión grande lo mandamos como string
             return str(v)
@@ -249,7 +264,17 @@ def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.where(pd.notna(out), None)
     for c in out.columns:
-        out[c] = out[c].map(_clean_cell)
+        # Manejo especial para columnas datetime
+        if pd.api.types.is_datetime64_any_dtype(out[c]):
+            # Convertir columna datetime a objetos datetime (no string)
+            out[c] = out[c].apply(lambda x: 
+                None if pd.isna(x) or pd.isnull(x) else 
+                x.to_pydatetime() if hasattr(x, 'to_pydatetime') else 
+                x if isinstance(x, datetime.datetime) else
+                None
+            )
+        else:
+            out[c] = out[c].map(_clean_cell)
 
     return out
 
@@ -283,31 +308,41 @@ def coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in out.columns:
         s = out[col]
 
-        # Detecta candidato a fecha (object/str, datetime, numpy datetime64)
-        if (s.dtype == object) or str(s.dtype).startswith(("datetime64", "datetime64[ns", "datetime64[us")):
+        # ✅ SOLO convertir columnas que realmente parecen fechas por el NOMBRE
+        datetime_column_patterns = [
+            r".*fecha.*", r".*date.*", r".*time.*", r".*captura.*", 
+            r".*created.*", r".*updated.*", r".*at$", r".*_at$",
+            r"f[a-z]*", r"hr.*", r".*timestamp.*"
+        ]
+        
+        is_likely_datetime = any(
+            re.match(pattern, col.lower()) 
+            for pattern in datetime_column_patterns
+        )
+        
+        # Solo procesar si ya es datetime64 O si el nombre sugiere fecha
+        if str(s.dtype).startswith(("datetime64", "datetime64[ns", "datetime64[us")):
+            # Ya es datetime, solo normalizar timezone
             try:
-                # Convierte a datetime (sin timezone); entradas inválidas -> NaT
+                if isinstance(s.dtype, pd.DatetimeTZDtype):
+                    out[col] = s.dt.tz_localize(None)
+                else:
+                    out[col] = s
+            except Exception:
+                pass
+        elif is_likely_datetime and s.dtype == object:
+            try:
+                # Solo intenta parsear si parece una columna de fecha por nombre
                 parsed = pd.to_datetime(s, errors="coerce", utc=False)
-
-                # Si viene con tz (poco común aquí), quítala
-                # Nota: el dtype tz-aware en pandas moderno es pd.DatetimeTZDtype
-                try:
-                    # pandas >= 2
-                    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
-                        parsed = parsed.dt.tz_localize(None)
-                except Exception:
-                    # fallback por si la clase no existe en la versión instalada
-                    if hasattr(parsed.dt, "tz_localize"):
-                        try:
-                            parsed = parsed.dt.tz_localize(None)
-                        except Exception:
-                            pass
-
-                # Normaliza fechas 'cero' que llegan como string
-                if s.dtype == object:
-                    mask_zero = s.astype(str).str.strip().isin(["0000-00-00", "0000-00-00 00:00:00"])
-                    if mask_zero.any():
-                        parsed = parsed.mask(mask_zero, pd.NaT)
+                
+                # Si más del 50% son NaT, probablemente no es una fecha real
+                if parsed.isna().sum() / len(parsed) > 0.5:
+                    continue  # Mantener original
+                
+                # Normalizar fechas cero
+                mask_zero = s.astype(str).str.strip().isin(["0000-00-00", "0000-00-00 00:00:00"])
+                if mask_zero.any():
+                    parsed = parsed.mask(mask_zero, pd.NaT)
 
                 out[col] = parsed
 
@@ -880,6 +915,12 @@ def insert_df(
 
     # 🔹 Normalización general para ClickHouse (bools, Decimal, NaN/NaT → None, etc.)
     df = normalize_for_clickhouse(df)
+    
+    # ✅ DEBUG: Ver qué tipos tenemos después de normalizar
+    log.info(f"🔍 DEBUG tipos después de normalización:")
+    for col in df.columns:
+        sample_val = df[col].iloc[0] if not df.empty and not pd.isna(df[col].iloc[0]) else None
+        log.info(f"  {col}: dtype={df[col].dtype}, sample={type(sample_val).__name__}={repr(sample_val)}")
 
     # 🔹 Deduplicado intra-chunk opcional
     if drop_dupes_in_chunk and unique_key and unique_key in df.columns:

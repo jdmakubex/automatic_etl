@@ -80,30 +80,35 @@ log_message "SUCCESS" "✅ Servicios estabilizados"
 log_message "INFO" "📋 FASE 2: Ingesta automática de datos"
 echo "🎯 EJECUTANDO INGESTA AUTOMÁTICA DE DATOS..."
 
-# Ejecutar ingesta directamente con logs detallados
-log_message "INFO" "🔄 Iniciando ingesta de MySQL a ClickHouse..."
-log_message "INFO" "   - Origen: mysql+pymysql://juan.marcos:***@172.21.61.53:3306/archivos"
-log_message "INFO" "   - Destino: ClickHouse fgeo_analytics"
-log_message "INFO" "   - Esquemas: archivos"
-log_message "INFO" "   - Chunk size: 50,000"
+# Ejecutar ingesta multi-database con logs detallados
+log_message "INFO" "🔄 Iniciando ingesta multi-database desde DB_CONNECTIONS..."
+log_message "INFO" "   - Parseando configuración desde .env"
+log_message "INFO" "   - Procesando todas las conexiones definidas"
+log_message "INFO" "   - Chunk size: 50,000 por defecto"
 
-if python3 tools/ingest_runner.py \
-    --source-url="mysql+pymysql://juan.marcos:123456@172.21.61.53:3306/archivos" \
-    --ch-database=fgeo_analytics \
-    --ch-prefix=archivos_ \
-    --schemas=archivos \
-    --chunksize=50000 \
-    --truncate-before-load \
-    --dedup=none 2>&1 | tee -a "$LOG_FILE"; then
+if python3 tools/multi_database_ingest.py 2>&1 | tee -a "$LOG_FILE"; then
     
-    # Verificar datos ingesados
+    # Verificar reporte multi-database
     log_message "INFO" "🔍 Verificando datos ingresados..."
-    TOTAL_ROWS=$(docker compose exec -T clickhouse clickhouse-client --user=etl --password=Et1Ingest! --query="SELECT sum(total_rows) FROM system.tables WHERE database = 'fgeo_analytics' AND total_rows > 0" 2>/dev/null || echo "0")
-    log_message "SUCCESS" "✅ Ingesta completada: $TOTAL_ROWS registros totales"
+    if [ -f "/app/logs/multi_database_ingest_report.json" ]; then
+        TOTAL_ROWS=$(python3 -c "
+import json
+try:
+    with open('/app/logs/multi_database_ingest_report.json', 'r') as f:
+        report = json.load(f)
+    print(report['summary']['total_records_processed'])
+except:
+    print('0')
+" 2>/dev/null || echo "0")
+        log_message "SUCCESS" "✅ Ingesta completada: $TOTAL_ROWS registros totales"
+    else
+        TOTAL_ROWS="0"
+        log_message "WARNING" "⚠️ Reporte multi-database no encontrado"
+    fi
     
     INGESTION_SUCCESS=true
 else
-    log_message "ERROR" "❌ Error en la ingesta de datos"
+    log_message "ERROR" "❌ Error en la ingesta multi-database"
     INGESTION_SUCCESS=false
 fi
 

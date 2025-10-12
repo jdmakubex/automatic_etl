@@ -28,8 +28,34 @@ logger = logging.getLogger(__name__)
 
 class MySQLTableDiscovery:
     def __init__(self):
-        # Configuración MySQL desde variables de entorno o valores por defecto
-        self.mysql_config = {
+        # Configuración MySQL desde DB_CONNECTIONS o variables legacy como fallback
+        self.mysql_config = self._get_mysql_config()
+        
+    def _get_mysql_config(self):
+        """Obtiene configuración MySQL desde DB_CONNECTIONS o variables legacy"""
+        # Intentar primero DB_CONNECTIONS
+        db_connections_str = os.getenv('DB_CONNECTIONS', '[]')
+        try:
+            import json
+            connections = json.loads(db_connections_str)
+            if isinstance(connections, dict):
+                connections = [connections]
+            if connections:
+                # Usar la primera conexión o buscar 'default'
+                conn = next((c for c in connections if c.get('name') == 'default'), connections[0])
+                return {
+                    'host': conn.get('host', '172.21.61.53'),
+                    'port': int(conn.get('port', 3306)),
+                    'user': conn.get('user', 'debezium'),
+                    'password': conn.get('pass', 'dbz'),
+                    'database': conn.get('db', 'archivos'),
+                    'charset': 'utf8mb4'
+                }
+        except (json.JSONDecodeError, KeyError):
+            pass
+            
+        # Fallback a variables legacy (mantener compatibilidad)
+        return {
             'host': os.getenv('MYSQL_HOST', '172.21.61.53'),
             'port': int(os.getenv('MYSQL_PORT', 3306)),
             'user': os.getenv('MYSQL_USER', 'debezium'),
