@@ -193,88 +193,41 @@ def _parse_maybe_datetime_series(s: pd.Series) -> pd.Series:
 
 def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Normaliza dataframe para ClickHouse:
-    - datetimes → naive (sin tz)
-    - bool → Int8
-    - Decimal → str o float (mantenemos str si hay precisión alta)
-    - NaN/NaT → None
-    - Objetos raros → str
+    Normaliza dataframe para ClickHouse preservando fidelidad de tipos MySQL:
+    - Mantiene tipos originales definidos por get_mysql_column_types()
+    - Solo procesa datetimes que YA son datetime
+    - Limpia NaN/None sin alterar tipos de datos
     """
     if df is None or df.empty:
         return df
 
     out = df.copy()
 
-    # 1) Datetimes
+    # 1) Solo normalizar datetimes que YA son datetime (sin conversiones forzadas)
     for col in out.columns:
-        out[col] = _parse_maybe_datetime_series(out[col])
+        if str(out[col].dtype).startswith(("datetime64", "datetime64[ns", "datetime64[us")):
+            out[col] = _parse_maybe_datetime_series(out[col])
 
-    # 2) Bools → Int8
-    bool_cols = out.select_dtypes(include=["bool"]).columns
-    if len(bool_cols) > 0:
-        out[bool_cols] = out[bool_cols].astype("int8")
+    # 2) Preservar tipos de pandas nullable (Int32, Int64, Float64, string)
+    # Estos ya vienen correctos desde MySQL según get_mysql_column_types()
 
-    # 3) Decimals / objetos → str si hace falta
-    def _clean_cell(v):
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return None
-        if isinstance(v, (np.floating,)):
-            if np.isnan(v):
-                return None
-            return float(v)
-        # ✅ pandas Timestamp → convertir a datetime object para ClickHouse
-        if isinstance(v, (pd.Timestamp,)):
-            # ya deberían venir sin tz
-            if pd.isna(v) or pd.isnull(v):
-                return None
-            try:
-                dt = v.to_pydatetime()
-                if dt.tzinfo is not None:
-                    dt = dt.replace(tzinfo=None)
-                return dt
-            except (ValueError, AttributeError):
-                return None
-        # ✅ CORREGIDO: datetime.datetime → mantener como objeto datetime para ClickHouse
-        elif isinstance(v, datetime.datetime):
-            try:
-                # quitar tz si la hubiera
-                if v.tzinfo is not None:
-                    v = v.replace(tzinfo=None)
-                return v
-            except (ValueError, AttributeError):
-                return None
-
-        # ✅ CORREGIDO: datetime.date → convertir a datetime para ClickHouse
-        elif isinstance(v, datetime.date):
-            try:
-                return datetime.datetime(v.year, v.month, v.day)
-            except (ValueError, AttributeError):
-                return None
-        if isinstance(v, Decimal):
-            # Para no perder precisión grande lo mandamos como string
-            return str(v)
-        # Tipos básicos OK
-        if isinstance(v, (int, float, str, bytes)):
-            return v
-        # Otros (dict/list/obj) -> str
-        try:
-            return json.dumps(v, ensure_ascii=False)
-        except Exception:
-            return str(v)
-
-    out = out.where(pd.notna(out), None)
-    for c in out.columns:
-        # Manejo especial para columnas datetime
-        if pd.api.types.is_datetime64_any_dtype(out[c]):
-            # Convertir columna datetime a objetos datetime (no string)
-            out[c] = out[c].apply(lambda x: 
-                None if pd.isna(x) or pd.isnull(x) else 
+    # 3) Solo limpiar NaN en object columns sin cambiar el tipo subyacente
+    for col in out.columns:
+        if out[col].dtype == 'object':
+            # Solo limpiar NaN manteniendo el tipo de datos original
+            out[col] = out[col].where(pd.notna(out[col]), None)
+    # 4) Limpiar solo NaN/None preservando tipos originales
+    for col in out.columns:
+        # Para columnas datetime, convertir a python datetime objects
+        if str(out[col].dtype).startswith(("datetime64", "datetime64[ns", "datetime64[us")):
+            out[col] = out[col].apply(lambda x: 
+                None if pd.isna(x) else 
                 x.to_pydatetime() if hasattr(x, 'to_pydatetime') else 
-                x if isinstance(x, datetime.datetime) else
-                None
+                x if isinstance(x, datetime.datetime) else None
             )
         else:
-            out[c] = out[c].map(_clean_cell)
+            # Para otros tipos, solo limpiar NaN manteniendo el tipo
+            out[col] = out[col].where(pd.notna(out[col]), None)
 
     return out
 
@@ -312,7 +265,7 @@ def coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
         datetime_column_patterns = [
             r".*fecha.*", r".*date.*", r".*time.*", r".*captura.*", 
             r".*created.*", r".*updated.*", r".*at$", r".*_at$",
-            r"f[a-z]*", r"hr.*", r".*timestamp.*"
+            r"f(echa|revision|validacion|actualizacion).*", r"hr.*", r".*timestamp.*"
         ]
         
         is_likely_datetime = any(
@@ -540,6 +493,12 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
         if v is None:
             return None
         
+        # Manejo robusto de float NaN PRIMERO (incluyendo numpy)
+        if isinstance(v, (float, np.floating)):
+            if np.isnan(v):
+                return None
+            return float(v)  # Convertir numpy a Python nativo
+        
         # Manejo de pandas NA/NaT/NaN con múltiples verificaciones
         try:
             if pd.isna(v):
@@ -591,6 +550,17 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
             if v.tzinfo is not None:
                 v = v.replace(tzinfo=None)
             return v
+        # Números float/int estándar (incluyendo numpy)
+        if isinstance(v, (float, int, np.integer, np.floating)):
+            if isinstance(v, (float, np.floating)) and (np.isnan(v) or np.isinf(v)):
+                return None
+            # Convertir numpy a Python nativo
+            if isinstance(v, np.integer):
+                return int(v)
+            elif isinstance(v, np.floating):
+                return float(v)
+            return v
+        
         # Cadenas "fecha cero" típicas de MySQL -> None
         if isinstance(v, str):
             vs = v.strip()
@@ -679,8 +649,20 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
         if isinstance(v, bool):
             return int(v)
         
-        # Por defecto, devolver tal cual (dict/list se serializan aguas arriba si aplica)
-        return v
+        # FALLBACK FINAL: Cualquier tipo problemático → string o None
+        try:
+            # Intentar convertir tipos problemáticos a string
+            if hasattr(v, '__len__') and not isinstance(v, str):
+                # Si tiene len(), probablemente es string-safe
+                return str(v) if v is not None else None
+            elif isinstance(v, (float, np.floating)) and (np.isnan(v) or np.isinf(v)):
+                return None
+            else:
+                # Para todo lo demás, convertir a string como fallback seguro
+                return str(v) if v is not None else None
+        except Exception:
+            # Si todo falla, devolver None
+            return None
 
     data = [tuple(cell(df.at[i, c]) for c in cols) for i in df.index]
     return data, cols
@@ -932,6 +914,13 @@ def insert_df(
 
     # 🔹 Convertir el DF a filas con datetime nativo/None garantizado
     data, cols = dataframe_to_clickhouse_rows(df, primary_keys, column_types)
+    
+    # 🔹 DEBUG: Verificar tipos en los datos antes de enviar
+    if data and len(data) > 0:
+        first_row = data[0]
+        for i, (col, val) in enumerate(zip(cols, first_row)):
+            log.info(f"  🔍 {col}: {type(val).__name__}={repr(val)}")
+    
     client.insert(f"{database}.{table}", data, column_names=cols)
     return len(data)
 
@@ -940,6 +929,49 @@ def insert_df(
 # ---------------------------------
 # Lectura por chunks desde SQLAlchemy
 # ---------------------------------
+def get_mysql_column_types(connection, schema: str, table: str) -> dict:
+    """
+    Obtiene los tipos exactos de las columnas MySQL para preservar fidelidad
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f"DESCRIBE `{schema}`.`{table}`")
+        columns_info = cursor.fetchall()
+        
+        type_mapping = {}
+        for col_info in columns_info:
+            col_name = col_info[0]
+            mysql_type = col_info[1].lower()
+            
+            # Mapear tipos MySQL a pandas dtypes preservando fidelidad
+            if 'varchar' in mysql_type or 'char' in mysql_type or 'text' in mysql_type:
+                pandas_dtype = 'string'  # Forzar string para campos de texto
+            elif 'int' in mysql_type and 'bigint' not in mysql_type:
+                pandas_dtype = 'Int32'  # Nullable integer
+            elif 'bigint' in mysql_type:
+                pandas_dtype = 'Int64'  # Nullable big integer  
+            elif 'decimal' in mysql_type or 'numeric' in mysql_type:
+                pandas_dtype = 'string'  # Preservar precisión como string
+            elif 'float' in mysql_type or 'double' in mysql_type:
+                pandas_dtype = 'Float64'  # Nullable float
+            elif 'datetime' in mysql_type or 'timestamp' in mysql_type:
+                pandas_dtype = 'datetime64[ns]'
+            elif 'date' in mysql_type:
+                pandas_dtype = 'datetime64[ns]'  # Will be handled later
+            elif 'time' in mysql_type:
+                pandas_dtype = 'string'  # Time as string
+            elif 'bool' in mysql_type or mysql_type.startswith('tinyint(1)'):
+                pandas_dtype = 'boolean'
+            else:
+                pandas_dtype = 'string'  # Default fallback
+                
+            type_mapping[col_name] = pandas_dtype
+            
+        return type_mapping
+    finally:
+        cursor.close()
+
+
 def read_table_in_chunks(engine: Engine, schema: str, table: str, chunksize: int, limit: Optional[int]) -> pd.DataFrame:
     base_sql = f"SELECT * FROM `{schema}`.`{table}`"
     if limit and limit > 0:
@@ -960,7 +992,23 @@ def read_table_in_chunks(engine: Engine, schema: str, table: str, chunksize: int
     )
     
     try:
-        return pd.read_sql(base_sql, con=connection, chunksize=chunksize)
+        # Obtener tipos exactos de MySQL para preservar fidelidad
+        column_types = get_mysql_column_types(connection, schema, table)
+        log.info(f"📋 Tipos detectados para {schema}.{table}: {column_types}")
+        
+        # Leer con tipos específicos para mantener fidelidad
+        try:
+            if chunksize:
+                return pd.read_sql(base_sql, con=connection, chunksize=chunksize, dtype=column_types)
+            else:
+                return pd.read_sql(base_sql, con=connection, dtype=column_types)
+        except Exception as e:
+            log.warning(f"⚠️ Error usando tipos específicos, leyendo con inferencia automática: {e}")
+            # Fallback: leer sin tipos específicos
+            if chunksize:
+                return pd.read_sql(base_sql, con=connection, chunksize=chunksize)
+            else:
+                return pd.read_sql(base_sql, con=connection)
     finally:
         connection.close()
 
