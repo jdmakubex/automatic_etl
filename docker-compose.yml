@@ -29,17 +29,29 @@ services:
     build:
       context: .
       dockerfile: tools/Dockerfile.pipeline-gen
+    env_file:
+      - .env
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_TCP_PORT=9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_ETL_USER:-etl}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_ETL_PASSWORD:-Et1Ingest!}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fgeo_analytics}
+      - SUPERSET_URL=http://superset:8088
+      - SUPERSET_USERNAME=admin
+      - SUPERSET_PASSWORD=admin
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./tools:/app/tools
       - ./logs:/app/logs
       - ./generated:/app/generated
+      - ./superset_bootstrap:/app/superset_bootstrap
       - ./.env:/app/.env:ro
-      - /var/run/docker.sock:/var/run/docker.sock  # Acceso directo al socket Docker
+      - /var/run/docker.sock:/var/run/docker.sock  # Acceso al socket Docker
     privileged: true
-    # Grupo docker dinámico basado en el GID del host
     group_add:
       - "${DOCKER_GID:-999}"  # GID dinámico del grupo docker
-    user: "1000:1000"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -47,13 +59,16 @@ services:
         condition: service_healthy
       kafka:
         condition: service_started
-    command: ["python3", "tools/master_orchestrator.py"]
+      superset:
+        condition: service_healthy
+    command: ["bash", "/app/tools/auto_pipeline.sh"]
     healthcheck:
-      test: ["CMD-SHELL", "test -f /app/logs/orchestrator_state.json || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD-SHELL", "test -f /app/logs/auto_pipeline_status.json || exit 1"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
       start_period: 60s
+    restart: "no"  # Solo ejecuta una vez
     networks:
       - etl_net
   
@@ -82,6 +97,7 @@ services:
       - ./logs:/app/logs
       - ./generated:/app/generated
       - ./bootstrap:/app/bootstrap
+      - ./superset_bootstrap:/app/superset_bootstrap
       - /var/run/docker.sock:/var/run/docker.sock  # Acceso directo al socket Docker
     privileged: true
     # Grupo docker dinámico basado en el GID del host
