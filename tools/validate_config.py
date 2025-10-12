@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
+validate_config.py
+Valida la configuración global y las variables de entorno requeridas para el pipeline ETL.
+Ejecución recomendada: Docker o local.
 📋 VALIDADOR DE CONFIGURACIÓN DEL PIPELINE ETL
-Valida que todas las variables de entorno estén correctamente configuradas
-antes de ejecutar el pipeline completo.
+Valida que todas las variables de entorno estén correctamente configuradas antes de ejecutar el pipeline completo.
 """
 
 import os

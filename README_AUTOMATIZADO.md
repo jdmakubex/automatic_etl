@@ -199,6 +199,17 @@ docker compose exec kafka kafka-topics --bootstrap-server kafka:9092 --list
 # Consultar datos en ClickHouse
 docker compose exec clickhouse clickhouse-client --database fgeo_analytics
 ```
+## Ciclo de reinicio y prueba automática
+
+Para apagar, limpiar y reiniciar toda la infraestructura ETL de forma automática, ejecuta:
+
+```bash
+bash tools/clean_and_restart_pipeline.sh
+```
+
+Esto apaga todos los contenedores, limpia volúmenes y archivos generados, reinicia los servicios y ejecuta el orquestador maestro sin intervención manual.
+
+Revisa los logs en `logs/` para resultados y diagnóstico.
 
 ## 🛠️ HERRAMIENTAS ADICIONALES
 

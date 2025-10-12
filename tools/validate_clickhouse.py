@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+validate_clickhouse.py
+Valida la existencia de bases de datos, tablas y datos en ClickHouse.
+Ejecución recomendada: Docker.
 Script de validación automática de ClickHouse.
 Valida tablas, datos y estructura en la base de datos ClickHouse.
 """

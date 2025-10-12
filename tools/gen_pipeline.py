@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+"""
+gen_pipeline.py
+Genera configuraciones y esquemas para conectores Debezium/Kafka a partir de las bases de datos origen.
+Ejecución recomendada: Docker, como parte del pipeline.
+"""
 # -*- coding: utf-8 -*-
 
 import os, json, re

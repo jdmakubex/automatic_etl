@@ -1,6 +1,8 @@
 FROM apache/superset:3.1.0
 
 USER root
+# Instala herramientas de red y utilidades para robustez y comunicación
+RUN apt-get update && apt-get install -y iputils-ping curl netcat-openbsd
 RUN pip install --no-cache-dir \
     clickhouse-connect==0.7.19 \
     clickhouse-sqlalchemy==0.2.6

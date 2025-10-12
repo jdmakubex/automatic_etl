@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Script para aplicar conectores de Debezium automáticamente
-Espera a que Connect esté listo y aplica todos los conectores configurados
+apply_connectors_auto.py
+Aplica conectores Debezium automáticamente en Kafka Connect.
+Ejecución recomendada: Docker, como parte del pipeline.
+Script para aplicar conectores de Debezium automáticamente.
+Espera a que Connect esté listo y aplica todos los conectores configurados.
 Usa configuración centralizada del archivo .env
 """
 import requests

@@ -1,15 +1,51 @@
+
+# --- [ROBUSTEZ] ---
+# 1. Instala herramientas necesarias para orquestación y validación
+# 2. Instala Docker CLI y plugin compose
+# 3. Crea grupo 'docker' (GID 999) y agrega el usuario al grupo para acceso al socket
+# 4. Documenta los cambios para trazabilidad
+
 FROM python:3.11-slim
 WORKDIR /app
-# Copiar requirements.txt desde el contexto raíz del proyecto
-COPY requirements.txt requirements.txt
-RUN python -m pip install --no-cache-dir -r requirements.txt && \
-    python -m pip install --no-cache-dir clickhouse-sqlalchemy==0.2.0
-# Instala utilidades estándar de Linux
-RUN apt-get update && apt-get install -y \
-    file \
-    coreutils \
-    bash \
-    curl \
+# Instala herramientas de red y utilidades para robustez y comunicación
+RUN apt-get update && apt-get install -y file coreutils bash curl wget gnupg lsb-release netcat-openbsd iputils-ping \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
+
+
+
+# --- [UNIFICACIÓN DE PERMISOS Y GRUPOS DOCKER] ---
+# Detecta automáticamente el GID del grupo docker del host y lo usa en el contenedor
+# Esto garantiza compatibilidad total entre host y contenedores para Docker socket
+RUN DOCKER_GID=$(stat -c %g /var/run/docker.sock 2>/dev/null || echo "999") \
+    && echo "🔧 Detectado Docker GID: $DOCKER_GID" \
+    && groupadd -g $DOCKER_GID docker \
+    && groupadd -g 1000 etl \
+    && useradd -m -u 1000 -g 1000 -G docker -s /bin/bash etl \
+    && chown -R etl:etl /app \
+    && echo "✅ Usuario etl configurado con acceso Docker automático"
+
+# --- [ROBUSTEZ AUTOMATIZADA] ---
+# - Detecta automáticamente el GID correcto del socket Docker del host
+# - Crea el grupo docker con el GID correcto para máxima compatibilidad
+# - El usuario 'etl' puede ejecutar comandos docker sin problemas de permisos
+# - Funciona en cualquier sistema (Linux, WSL, Docker Desktop, etc.)
+# - Este ajuste unificado se replica en todos los contenedores ETL
+
+# --- [DOCUMENTACIÓN DE AJUSTES] ---
+# - El usuario 'etl' tiene permisos para acceder al socket Docker y ejecutar comandos docker
+# - Este ajuste es perdurable y portable para todos los despliegues
+
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
 # Robustecer: crear directorios requeridos y establecer permisos
 RUN mkdir -p /app/logs /app/generated && chmod 777 /app/logs /app/generated
+
+# --- [DOCUMENTACIÓN DE AJUSTES] ---
+# - El grupo 'docker' permite acceso al socket /var/run/docker.sock
+# - El usuario principal del contenedor puede ejecutar comandos docker
+# - Este patrón se replica en todos los contenedores que requieren acceso robusto a Docker

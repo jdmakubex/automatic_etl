@@ -1,33 +1,15 @@
 #!/usr/bin/env python3
 """
-🎯 ORQUESTADOR AUTOMÁTICO DEL PIPELINE ETL
-Script maestro que ejecuta TODA la inicialización automática:
+orchestrate_etl_init.py
+Orquestador maestro del pipeline ETL. Ejecuta todas las fases de inicialización y validación, maneja reintentos automáticos y asegura la secuencia correcta de pasos.
+Ejecución recomendada: Servicio Docker (`etl-orchestrator`).
 
-FASE 1: LIMPIEZA COMPLETA
-- Elimina conectores, tópicos, tablas existentes
-- Limpia configuraciones previas
-
-FASE 2: CONFIGURACIÓN DE USUARIOS
-- Crea usuarios MySQL con permisos de replicación
-- Configura usuarios ClickHouse con permisos de escritura
-- Valida conectividad
-
-FASE 3: DESCUBRIMIENTO DE ESQUEMAS
-- Detecta automáticamente tablas en MySQL
-- Genera configuraciones de conectores
-- Crea esquemas ClickHouse optimizados
-
-FASE 4: DESPLIEGUE DE INFRAESTRUCTURA
-- Aplica conectores Debezium
-- Crea tablas en ClickHouse
-- Inicia flujo de datos
-
-FASE 5: VALIDACIÓN COMPLETA
-- Verifica flujo MySQL → Kafka → ClickHouse
-- Confirma datos en destino
-- Reporta estado final
-
-Este script se ejecuta automáticamente al levantar Docker Compose.
+FASES PRINCIPALES:
+1. Limpieza completa
+2. Configuración de usuarios
+3. Descubrimiento de esquemas
+4. Despliegue de conectores
+5. Validación completa
 """
 
 import subprocess
@@ -108,21 +90,27 @@ class ETLOrchestrator:
                 'script': 'gen_pipeline.py',
                 'description': 'Generar configuraciones de conectores y esquemas',
                 'required': True,
-                'timeout': 120
+                'timeout': 120,
+                'retries': 3,
+                'retry_delay': 10
             },
             'connectors': {
                 'name': '🔌 DESPLIEGUE DE CONECTORES',
                 'script': 'apply_connectors_auto.py',
                 'description': 'Aplicar conectores Debezium automáticamente',
                 'required': True,
-                'timeout': 180
+                'timeout': 180,
+                'retries': 3,
+                'retry_delay': 15
             },
             'validation': {
                 'name': '✅ VALIDACIÓN COMPLETA',
                 'script': 'pipeline_status.py',
                 'description': 'Verificar flujo completo de datos',
                 'required': False,  # No crítico - permite continuar aunque falle
-                'timeout': 60
+                'timeout': 60,
+                'retries': 2,
+                'retry_delay': 10
             }
         }
         
@@ -200,96 +188,95 @@ class ETLOrchestrator:
         return True
     
     def execute_phase(self, phase_key: str) -> bool:
-        """Ejecutar una fase específica"""
+        """Ejecutar una fase específica con reintentos automáticos"""
         phase = self.phase_config[phase_key]
         self.current_phase = phase_key
         self.status['current_phase'] = phase['name']
-        
+
         logger.info(f"\n{'='*80}")
         logger.info(f"🚀 INICIANDO FASE: {phase['name']}")
         logger.info(f"📋 Descripción: {phase['description']}")
         logger.info(f"🔧 Script: {phase['script']}")
+        logger.info(f"🔁 Reintentos permitidos: {phase.get('retries', 1)}")
         logger.info(f"{'='*80}")
-        
+
+        max_retries = phase.get('retries', 1)
+        retry_delay = phase.get('retry_delay', 10)
+        attempt = 0
         phase_start = time.time()
-        
-        try:
-            # Construir comando
-            cmd = f"cd /app && python3 tools/{phase['script']}"
-            
-            logger.info(f"▶️  Ejecutando: {cmd}")
-            
-            # Ejecutar con timeout
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=phase['timeout']
-            )
-            
-            phase_duration = time.time() - phase_start
-            
-            # Procesar resultado
-            if result.returncode == 0:
-                logger.info(f"✅ FASE COMPLETADA: {phase['name']} ({phase_duration:.1f}s)")
-                
-                # Log output si hay contenido relevante
-                if result.stdout.strip():
-                    logger.debug("📤 Salida del script:")
-                    for line in result.stdout.strip().split('\n')[-10:]:  # Últimas 10 líneas
-                        logger.debug(f"   {line}")
-                
-                self.status['phases_completed'] += 1
-                return True
-                
-            else:
-                logger.error(f"❌ FASE FALLÓ: {phase['name']} (código: {result.returncode})")
-                
-                # Log error output
-                if result.stderr.strip():
-                    logger.error("📤 Error del script:")
-                    for line in result.stderr.strip().split('\n')[-10:]:
-                        logger.error(f"   {line}")
-                
+
+        while attempt < max_retries:
+            attempt += 1
+            logger.info(f"▶️  Intento {attempt}/{max_retries} de fase: {phase['name']}")
+            try:
+                cmd = f"cd /app && python3 tools/{phase['script']}"
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=phase['timeout']
+                )
+                phase_duration = time.time() - phase_start
+
+                if result.returncode == 0:
+                    logger.info(f"✅ FASE COMPLETADA: {phase['name']} en intento {attempt} ({phase_duration:.1f}s)")
+                    if result.stdout.strip():
+                        logger.debug("📤 Salida del script:")
+                        for line in result.stdout.strip().split('\n')[-10:]:
+                            logger.debug(f"   {line}")
+                    self.status['phases_completed'] += 1
+                    return True
+                else:
+                    logger.error(f"❌ FASE FALLÓ: {phase['name']} (código: {result.returncode}) en intento {attempt}")
+                    if result.stderr.strip():
+                        logger.error("📤 Error del script:")
+                        for line in result.stderr.strip().split('\n')[-10:]:
+                            logger.error(f"   {line}")
+                    error_info = {
+                        'phase': phase['name'],
+                        'script': phase['script'],
+                        'return_code': result.returncode,
+                        'error': result.stderr.strip()[-500:] if result.stderr.strip() else 'No error output',
+                        'duration': phase_duration,
+                        'attempt': attempt
+                    }
+                    self.status['errors'].append(error_info)
+                    if attempt < max_retries:
+                        logger.info(f"⏳ Esperando {retry_delay}s antes de reintentar...")
+                        time.sleep(retry_delay)
+            except subprocess.TimeoutExpired:
+                phase_duration = time.time() - phase_start
+                logger.error(f"⏰ FASE TIMEOUT: {phase['name']} ({phase['timeout']}s) en intento {attempt}")
                 error_info = {
                     'phase': phase['name'],
                     'script': phase['script'],
-                    'return_code': result.returncode,
-                    'error': result.stderr.strip()[-500:] if result.stderr.strip() else 'No error output',
-                    'duration': phase_duration
+                    'error': f'Timeout después de {phase["timeout"]}s',
+                    'duration': phase_duration,
+                    'attempt': attempt
                 }
                 self.status['errors'].append(error_info)
-                
-                return not phase['required']  # Si no es requerida, continuar
-        
-        except subprocess.TimeoutExpired:
-            phase_duration = time.time() - phase_start
-            logger.error(f"⏰ FASE TIMEOUT: {phase['name']} ({phase['timeout']}s)")
-            
-            error_info = {
-                'phase': phase['name'],
-                'script': phase['script'],
-                'error': f'Timeout después de {phase["timeout"]}s',
-                'duration': phase_duration
-            }
-            self.status['errors'].append(error_info)
-            
-            return not phase['required']
-            
-        except Exception as e:
-            phase_duration = time.time() - phase_start
-            logger.error(f"💥 FASE ERROR: {phase['name']} - {str(e)}")
-            
-            error_info = {
-                'phase': phase['name'],
-                'script': phase['script'],
-                'error': str(e),
-                'duration': phase_duration
-            }
-            self.status['errors'].append(error_info)
-            
-            return not phase['required']
+                if attempt < max_retries:
+                    logger.info(f"⏳ Esperando {retry_delay}s antes de reintentar...")
+                    time.sleep(retry_delay)
+            except Exception as e:
+                phase_duration = time.time() - phase_start
+                logger.error(f"💥 FASE ERROR: {phase['name']} - {str(e)} en intento {attempt}")
+                error_info = {
+                    'phase': phase['name'],
+                    'script': phase['script'],
+                    'error': str(e),
+                    'duration': phase_duration,
+                    'attempt': attempt
+                }
+                self.status['errors'].append(error_info)
+                if attempt < max_retries:
+                    logger.info(f"⏳ Esperando {retry_delay}s antes de reintentar...")
+                    time.sleep(retry_delay)
+
+        # Si no se logró completar la fase después de los reintentos
+        logger.error(f"❌ FASE NO SUPERADA: {phase['name']} tras {max_retries} intentos")
+        return not phase['required']
     
     def save_execution_log(self):
         """Guardar log completo de ejecución"""

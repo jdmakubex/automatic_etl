@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+pipeline_status.py
+Valida el estado final del pipeline ETL (Kafka, conectores, ClickHouse). 
+Reporta si el flujo de datos está activo y muestra muestra de datos.
+Ejecución recomendada: Docker o local.
 Resumen final del estado del pipeline ETL
 """
 
@@ -43,23 +47,45 @@ def check_mysql_connector():
     return False, "No hay respuesta del connector"
 
 def check_clickhouse_data():
-    """Verificar datos en ClickHouse"""
+    """Verificar datos en todas las tablas de fgeo_analytics"""
+    # Obtener lista de tablas
     success, stdout, stderr = run_docker_command(
-        "docker compose exec clickhouse clickhouse-client --database fgeo_analytics --query 'SELECT COUNT(*) FROM archivos' 2>/dev/null"
+        "docker compose exec clickhouse clickhouse-client --database fgeo_analytics --query 'SHOW TABLES' 2>/dev/null"
     )
-    if success and stdout.isdigit():
-        count = int(stdout)
-        return count > 0, f"{count} registros en tabla archivos"
-    return False, "No hay datos o error de conexión"
+    if not success or not stdout:
+        return False, "No se pudo obtener lista de tablas"
+    tablas = [t.strip() for t in stdout.split('\n') if t.strip()]
+    if not tablas:
+        return False, "No hay tablas en fgeo_analytics"
+    # Verificar datos en cada tabla
+    tablas_con_datos = []
+    for tabla in tablas:
+        ok, out, err = run_docker_command(
+            f"docker compose exec clickhouse clickhouse-client --database fgeo_analytics --query 'SELECT COUNT(*) FROM {tabla}' 2>/dev/null"
+        )
+        if ok and out.isdigit() and int(out) > 0:
+            tablas_con_datos.append((tabla, int(out)))
+    if tablas_con_datos:
+        msg = ", ".join([f"{t}: {c} registros" for t, c in tablas_con_datos])
+        return True, f"Tablas con datos: {msg}"
+    return False, "No hay datos en ninguna tabla"
 
 def check_data_sample():
-    """Obtener muestra de datos"""
+    """Obtener muestra de datos de la primera tabla con datos"""
+    # Obtener lista de tablas
     success, stdout, stderr = run_docker_command(
-        "docker compose exec clickhouse clickhouse-client --database fgeo_analytics --query 'SELECT id, nombre, tamano FROM archivos ORDER BY id LIMIT 3' --format TSV 2>/dev/null"
+        "docker compose exec clickhouse clickhouse-client --database fgeo_analytics --query 'SHOW TABLES' 2>/dev/null"
     )
-    if success and stdout:
-        return True, stdout
-    return False, "No se pudo obtener muestra"
+    if not success or not stdout:
+        return False, "No se pudo obtener lista de tablas"
+    tablas = [t.strip() for t in stdout.split('\n') if t.strip()]
+    for tabla in tablas:
+        ok, out, err = run_docker_command(
+            f"docker compose exec clickhouse clickhouse-client --database fgeo_analytics --query 'SELECT * FROM {tabla} LIMIT 3' --format TSV 2>/dev/null"
+        )
+        if ok and out:
+            return True, out
+    return False, "No se pudo obtener muestra de datos"
 
 def main():
     print("=" * 60)
