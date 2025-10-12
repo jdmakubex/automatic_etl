@@ -216,15 +216,41 @@ def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
         if out[col].dtype == 'object':
             # Solo limpiar NaN manteniendo el tipo de datos original
             out[col] = out[col].where(pd.notna(out[col]), None)
-    # 4) Limpiar solo NaN/None preservando tipos originales
+    # 4) Limpiar y convertir tipos preservando fidelidad
     for col in out.columns:
-        # Para columnas datetime, convertir a python datetime objects
+        # Para columnas datetime, convertir a python datetime objects para ClickHouse
         if str(out[col].dtype).startswith(("datetime64", "datetime64[ns", "datetime64[us")):
             out[col] = out[col].apply(lambda x: 
                 None if pd.isna(x) else 
                 x.to_pydatetime() if hasattr(x, 'to_pydatetime') else 
                 x if isinstance(x, datetime.datetime) else None
             )
+        # Para columnas object que pueden contener TIME de MySQL, limpiar formato
+        elif out[col].dtype == 'object' or str(out[col].dtype) == 'string':
+            def clean_time_string(x):
+                if pd.isna(x) or x is None:
+                    return None
+                # Si es timedelta (TIME de MySQL), convertir a formato HH:MM:SS
+                if isinstance(x, (pd.Timedelta, datetime.timedelta)):
+                    if hasattr(x, 'total_seconds'):
+                        total_seconds = int(x.total_seconds())
+                    else:
+                        total_seconds = int(x.seconds)
+                    hours = total_seconds // 3600
+                    minutes = (total_seconds % 3600) // 60
+                    seconds = total_seconds % 60
+                    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                # Si es string que parece timedelta, procesarla
+                if isinstance(x, str) and 'days' in x and ':' in x:
+                    # Formato: "0 days 12:02:03" → "12:02:03"
+                    try:
+                        parts = x.split(' ')
+                        if len(parts) >= 3:
+                            return parts[-1]  # Tomar la parte HH:MM:SS
+                    except:
+                        pass
+                return str(x) if x is not None else None
+            out[col] = out[col].apply(clean_time_string)
         else:
             # Para otros tipos, solo limpiar NaN manteniendo el tipo
             out[col] = out[col].where(pd.notna(out[col]), None)
@@ -955,11 +981,11 @@ def get_mysql_column_types(connection, schema: str, table: str) -> dict:
             elif 'float' in mysql_type or 'double' in mysql_type:
                 pandas_dtype = 'Float64'  # Nullable float
             elif 'datetime' in mysql_type or 'timestamp' in mysql_type:
-                pandas_dtype = 'datetime64[ns]'
-            elif 'date' in mysql_type:
-                pandas_dtype = 'datetime64[ns]'  # Will be handled later
+                pandas_dtype = 'datetime64[ns]'  # Fechas con tiempo completas
+            elif mysql_type.startswith('date'):  # DATE específico (solo fecha sin hora)
+                pandas_dtype = 'datetime64[ns]'  # Convertir a datetime para compatibilidad
             elif 'time' in mysql_type:
-                pandas_dtype = 'string'  # Time as string
+                pandas_dtype = 'object'  # TIME como object para poder procesarlo después
             elif 'bool' in mysql_type or mysql_type.startswith('tinyint(1)'):
                 pandas_dtype = 'boolean'
             else:
