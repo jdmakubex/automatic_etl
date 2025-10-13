@@ -89,36 +89,74 @@ def validate_db_connections(db_connections_json: str) -> List[Dict]:
             f"Ejemplo válido: [{{'name':'db1','host':'localhost','port':3306,'user':'root','pass':'pwd','db':'mydb'}}]"
         )
     
-    if isinstance(connections, dict):
-        connections = [connections]
-    
     if not isinstance(connections, list):
         raise ValidationError(
-            f"DB_CONNECTIONS debe ser una lista o diccionario, recibido: {type(connections).__name__}"
+            f"DB_CONNECTIONS debe ser una lista de diccionarios, recibido: {type(connections).__name__}"
         )
     
-    # Validar cada conexión
+    # Validar estructura de cada conexión
+    required_fields = ['name', 'type', 'host', 'port', 'user', 'pass', 'db']
     for i, conn in enumerate(connections):
         if not isinstance(conn, dict):
-            raise ValidationError(
-                f"Conexión #{i} en DB_CONNECTIONS debe ser un diccionario, recibido: {type(conn).__name__}"
-            )
+            raise ValidationError(f"Conexión {i}: debe ser un diccionario, recibido: {type(conn).__name__}")
         
-        # Validar campos requeridos según tipo
-        conn_type = conn.get("type", "mysql")
-        
-        if conn_type == "mysql":
-            required_fields = ["host", "user", "pass", "db"]
-            missing = [f for f in required_fields if f not in conn]
-            if missing:
-                raise ValidationError(
-                    f"Conexión MySQL #{i} ('{conn.get('name', 'sin nombre')}') "
-                    f"falta campos requeridos: {', '.join(missing)}. "
-                    f"Campos requeridos: {', '.join(required_fields)}"
-                )
+        for field in required_fields:
+            if field not in conn:
+                raise ValidationError(f"Conexión {i}: campo requerido '{field}' faltante")
     
-    log.info(f"✓ DB_CONNECTIONS validado: {len(connections)} conexión(es)")
     return connections
+
+
+def get_db_connections():
+    """
+    Lee DB_CONNECTIONS directamente del archivo .env.
+    
+    Returns:
+        Lista de diccionarios con las conexiones
+        
+    Raises:
+        FatalError: Si no se puede leer o parsear DB_CONNECTIONS
+    """
+    import re, json
+    try:
+        with open('/app/.env') as f:
+            env = f.read()
+        # Buscar la línea DB_CONNECTIONS y limpiar espacios
+        value = None
+        for line in env.splitlines():
+            if line.strip().startswith('DB_CONNECTIONS='):
+                value = line.strip()[len('DB_CONNECTIONS='):].strip()
+                # Eliminar comentarios al final de la línea
+                value = value.split('#')[0].strip()
+                print(f"[DEBUG] Valor extraído de DB_CONNECTIONS: {value}")
+                break
+        if value is None:
+            raise FatalError('DB_CONNECTIONS no encontrada en .env')
+        conns = json.loads(value)
+        print(f"[DEBUG] Conexiones extraídas: {conns}")
+        return conns
+    except Exception as e:
+        raise FatalError(f'DB_CONNECTIONS no es un JSON válido: {e}')
+
+
+def validate_mysql_connection(conn: Dict) -> None:
+    """
+    Valida una conexión MySQL específica.
+    
+    Args:
+        conn: Diccionario con datos de conexión
+        
+    Raises:
+        ValidationError: Si la conexión es inválida
+    """
+    required_fields = ["host", "user", "pass", "db"]
+    missing = [f for f in required_fields if f not in conn]
+    if missing:
+        raise ValidationError(
+            f"Conexión MySQL '{conn.get('name', 'sin nombre')}' "
+            f"falta campos requeridos: {', '.join(missing)}. "
+            f"Campos requeridos: {', '.join(required_fields)}"
+        )
 
 
 def validate_python_dependencies(required_packages: List[str]) -> Tuple[List[str], List[str]]:
@@ -351,14 +389,29 @@ def run_validations(
             
             # Validar DB_CONNECTIONS si está definido
             if results["env_vars"]["DB_CONNECTIONS"] != "[]":
-                results["db_connections"] = validate_db_connections(
-                    results["env_vars"]["DB_CONNECTIONS"]
-                )
+                try:
+                    results["db_connections"] = validate_db_connections(
+                        results["env_vars"]["DB_CONNECTIONS"]
+                    )
+                except ValidationError as conn_error:
+                    results["warnings"].append(f"DB_CONNECTIONS: {conn_error}")
+                    log.warning(f"⚠ DB_CONNECTIONS: {conn_error}")
+                    results["db_connections"] = []  # Mantener como lista vacía en caso de error
+            else:
+                # Si DB_CONNECTIONS está vacío, usar get_db_connections() como fallback
+                try:
+                    results["db_connections"] = get_db_connections()
+                    log.info("✓ DB_CONNECTIONS leído directamente desde .env")
+                except Exception as fallback_error:
+                    results["warnings"].append(f"No se pudo leer DB_CONNECTIONS: {fallback_error}")
+                    results["db_connections"] = []
         except ValidationError as e:
             results["warnings"].append(str(e))
             log.warning(f"⚠ {e}")
+            results["db_connections"] = []  # Asegurar que siempre sea una lista
         except FatalError as e:
             results["errors"].append(str(e))
+            results["db_connections"] = []  # Asegurar que siempre sea una lista
             raise
     
     # 2. Dependencias Python
@@ -407,31 +460,57 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(message)s"
     )
     
+    # DEPURACIÓN: Forzar y mostrar el valor extraído de DB_CONNECTIONS
+    try:
+        conns = get_db_connections()
+        print(f"[DEBUG] Conexiones extraídas: {conns}")
+    except Exception as e:
+        print(f"[DEBUG] Error extrayendo DB_CONNECTIONS: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(2)
+
     try:
         results = run_validations()
-        
         print("\n=== Resultados de Validación ===")
-        print(f"✓ Variables de entorno: {len(results['env_vars'])}")
-        print(f"✓ Conexiones DB: {len(results['db_connections'])}")
-        print(f"✓ Dependencias instaladas: {len(results['dependencies']['installed'])}")
         
-        if results["dependencies"]["missing"]:
-            print(f"⚠ Dependencias faltantes: {len(results['dependencies']['missing'])}")
+        # Validar variables de entorno
+        env_vars_count = len(results['env_vars']) if results.get('env_vars') else 0
+        print(f"✓ Variables de entorno: {env_vars_count}")
         
-        if results["warnings"]:
-            print(f"\n⚠ Advertencias ({len(results['warnings'])}):")
-            for w in results["warnings"]:
+        # Validar conexiones DB con manejo robusto de None
+        db_connections = results.get('db_connections')
+        if db_connections is not None:
+            print(f"✓ Conexiones DB: {len(db_connections)}")
+            if len(db_connections) > 0:
+                print(f"  - Bases de datos configuradas: {', '.join([conn.get('db', 'unknown') for conn in db_connections])}")
+        else:
+            print("✗ Conexiones DB: No configuradas o error en parsing")
+        
+        # Validar dependencias
+        dependencies = results.get('dependencies', {})
+        installed_count = len(dependencies.get('installed', []))
+        missing_count = len(dependencies.get('missing', []))
+        print(f"✓ Dependencias instaladas: {installed_count}")
+        
+        if missing_count > 0:
+            print(f"⚠ Dependencias faltantes: {missing_count}")
+            for dep in dependencies.get('missing', []):
+                print(f"  - {dep}")
+        
+        # Mostrar advertencias si existen
+        warnings = results.get("warnings", [])
+        if warnings:
+            print(f"\n⚠ Advertencias ({len(warnings)}):")
+            for w in warnings:
                 print(f"  - {w}")
-        
         if results["errors"]:
             print(f"\n✗ Errores fatales ({len(results['errors'])}):")
             for e in results["errors"]:
                 print(f"  - {e}")
             sys.exit(1)
-        
         print("\n✓ Todas las validaciones pasaron correctamente")
         sys.exit(0)
-        
     except FatalError as e:
         print(f"\n✗ Error fatal: {e}")
         sys.exit(1)

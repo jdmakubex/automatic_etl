@@ -99,6 +99,7 @@ services:
       - ./bootstrap:/app/bootstrap
       - ./superset_bootstrap:/app/superset_bootstrap
       - /var/run/docker.sock:/var/run/docker.sock  # Acceso directo al socket Docker
+      - ./.env:/app/.env
     privileged: true
     # Grupo docker dinámico basado en el GID del host
     group_add:
@@ -109,7 +110,6 @@ services:
         condition: service_healthy
       connect:
         condition: service_healthy
-    entrypoint: ["tail", "-f", "/dev/null"]
     healthcheck:
       test: ["CMD-SHELL", "test -d /app/tools && python3 --version && docker --version || exit 1"]
       interval: 10s
@@ -156,7 +156,9 @@ services:
 
   # ---------- CLICKHOUSE ----------
   clickhouse:
-    image: clickhouse/clickhouse-server:24.3
+    build:
+      context: .
+      dockerfile: clickhouse.Dockerfile
     container_name: clickhouse
     networks:
       - etl_net

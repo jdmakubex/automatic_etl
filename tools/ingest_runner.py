@@ -208,7 +208,9 @@ def process_mysql_date_columns(df: pd.DataFrame, mysql_column_info: dict) -> pd.
         if mysql_type and 'date' in mysql_type and not any(x in mysql_type for x in ['datetime', 'timestamp']):
             log.info(f"🗓️ Procesando campo DATE MySQL: {col} (tipo: {mysql_type})")
             
-            if str(df[col].dtype).startswith('datetime64'):
+            # Procesar tanto datetime64 como object (que puede contener date objects)
+            col_dtype = str(df[col].dtype)
+            if col_dtype.startswith('datetime64') or col_dtype == 'object':
                 series = df[col]
                 processed_dates = []
                 
@@ -336,51 +338,50 @@ def _parse_datetime_series(s: pd.Series) -> pd.Series:
 
 def coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    datetime_column_patterns = [
+        r".*fecha.*", r".*date.*", r".*time.*", r".*captura.*", 
+        r".*created.*", r".*updated.*", r".*at$", r".*_at$",
+        r"f(echa|revision|validacion|actualizacion).*", r"hr.*", r".*timestamp.*"
+    ]
     for col in out.columns:
         s = out[col]
-
-        # ✅ SOLO convertir columnas que realmente parecen fechas por el NOMBRE
-        datetime_column_patterns = [
-            r".*fecha.*", r".*date.*", r".*time.*", r".*captura.*", 
-            r".*created.*", r".*updated.*", r".*at$", r".*_at$",
-            r"f(echa|revision|validacion|actualizacion).*", r"hr.*", r".*timestamp.*"
-        ]
-        
         is_likely_datetime = any(
             re.match(pattern, col.lower()) 
             for pattern in datetime_column_patterns
         )
-        
-        # Solo procesar si ya es datetime64 O si el nombre sugiere fecha
-        if str(s.dtype).startswith(("datetime64", "datetime64[ns", "datetime64[us")):
-            # Ya es datetime, solo normalizar timezone
+        # Si ya es datetime, normalizar timezone
+        if pd.api.types.is_datetime64_any_dtype(s):
             try:
-                if isinstance(s.dtype, pd.DatetimeTZDtype):
+                if hasattr(s.dt, "tz") and s.dt.tz is not None:
                     out[col] = s.dt.tz_localize(None)
                 else:
                     out[col] = s
             except Exception:
-                pass
-        elif is_likely_datetime and s.dtype == object:
-            try:
-                # Solo intenta parsear si parece una columna de fecha por nombre
-                parsed = pd.to_datetime(s, errors="coerce", utc=False)
-                
-                # Si más del 50% son NaT, probablemente no es una fecha real
-                if parsed.isna().sum() / len(parsed) > 0.5:
-                    continue  # Mantener original
-                
-                # Normalizar fechas cero
-                mask_zero = s.astype(str).str.strip().isin(["0000-00-00", "0000-00-00 00:00:00"])
-                if mask_zero.any():
-                    parsed = parsed.mask(mask_zero, pd.NaT)
-
-                out[col] = parsed
-
-            except Exception:
-                # Si algo raro pasa, no rompas: deja la columna como estaba
-                pass
-
+                out[col] = s
+        # Si el nombre sugiere fecha, forzar conversión robusta
+        elif is_likely_datetime:
+            def robust_parse(val):
+                if pd.isna(val) or val is None:
+                    return None
+                sval = str(val).strip()
+                if sval in ["", "0000-00-00", "0000-00-00 00:00:00"]:
+                    return None
+                try:
+                    dt = pd.to_datetime(sval, errors="coerce", utc=False)
+                    if pd.isna(dt):
+                        return None
+                    # Si es pandas.Timestamp, convertir a datetime
+                    if isinstance(dt, pd.Timestamp):
+                        return dt.to_pydatetime()
+                    if isinstance(dt, datetime.datetime):
+                        return dt
+                    return None
+                except Exception:
+                    return None
+            out[col] = s.apply(robust_parse)
+        # Si es object pero no parece fecha, mantener el tipo original
+        elif s.dtype == object:
+            out[col] = s.where(pd.notna(s), None)
     return out
 
 

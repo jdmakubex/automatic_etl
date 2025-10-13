@@ -137,7 +137,7 @@ def check_automation_content():
     # Verificar ingesta automática
     checks.append(check_content_in_file(
         "tools/auto_pipeline.sh",
-        "ingest_runner.py",
+        "multi_database_ingest.py",
         "Ingesta automática de datos"
     ))
     

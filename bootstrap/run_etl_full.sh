@@ -376,11 +376,51 @@ fi
 
 # Ejecutar script de creación de tablas en ClickHouse
 printf "[ETL] Ejecutando script de creación de tablas en ClickHouse...\n" | tee -a logs/etl_full.log
+
+# Ejecutar script de creación de tablas en ClickHouse
 docker compose run --rm pipeline-gen bash /app/generated/default/ch_create_raw_pipeline.sh | tee -a logs/etl_full.log
 
-# Ejecutar ingesta de datos en ClickHouse
-echo "[ETL] Ejecutando ingesta de datos en ClickHouse..." | tee -a logs/etl_full.log
-docker compose run --rm etl-tools python tools/ingest_runner.py --source-url=mysql+pymysql://juan.marcos:123456@172.21.61.53:3306/archivos --ch-database=fgeo_analytics --ch-prefix=archivos_ --schemas archivos --chunksize 50000 --truncate-before-load --dedup none | tee -a logs/etl_full.log
+# Ingesta dinámica para todas las bases de datos configuradas en .env
+echo "[ETL] Ejecutando ingesta dinámica de datos en ClickHouse para todas las bases configuradas..." | tee -a logs/etl_full.log
+
+# Extraer conexiones del .env y recorrer cada una
+
+# Generar comandos de ingesta para cada conexión y ejecutarlos desde Bash
+
+# Extraer DB_CONNECTIONS usando Python para evitar errores de formato
+python3 - <<EOF > generated/ingest_commands.sh
+import re, json
+with open('.env') as f:
+  env = f.read()
+match = re.search(r'DB_CONNECTIONS=(\[.*?\])', env, re.DOTALL)
+if not match:
+  print('echo "[ETL] ERROR: No se encontró DB_CONNECTIONS en .env" | tee -a logs/etl_full.log')
+else:
+  conns = json.loads(match.group(1))
+  for conn in conns:
+    dbtype = conn.get('type')
+    user = conn.get('user')
+    password = conn.get('pass')
+    host = conn.get('host')
+    port = conn.get('port')
+    db = conn.get('db')
+    name = conn.get('name', db)
+    if dbtype == 'mysql':
+      url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{db}"
+      ch_database = f"{db}_analytics"
+      ch_prefix = f"{db}_"
+      schemas = db
+      print(f"echo '[ETL] Ingestando base: {db} → ClickHouse: {ch_database}' | tee -a logs/etl_full.log")
+      print(f"docker compose run --rm etl-tools python tools/ingest_runner.py --source-url={url} --ch-database={ch_database} --ch-prefix={ch_prefix} --schemas {schemas} --chunksize 50000 --truncate-before-load --dedup none | tee -a logs/etl_full.log")
+EOF
+
+# Ejecutar los comandos generados
+chmod +x generated/ingest_commands.sh
+bash generated/ingest_commands.sh
+
+# Ejecutar los comandos generados
+chmod +x generated/ingest_commands.sh
+bash generated/ingest_commands.sh
 
 # Validar tablas y filas en ClickHouse
 printf "\n[ETL] Tablas en ClickHouse (fgeo_analytics):\n" | tee -a logs/etl_full.log

@@ -1,4 +1,7 @@
+
 FROM clickhouse/clickhouse-server:24.3
+# Instala curl para permitir la configuración robusta
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # Configurar usuario default con todos los permisos para inicialización
 COPY bootstrap/users.xml /etc/clickhouse-server/users.d/init_users.xml
