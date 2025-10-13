@@ -561,20 +561,71 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
         if isinstance(v, pd.Timestamp):
             if v.tzinfo is not None:
                 v = v.tz_localize(None)
-            return v.to_pydatetime()
+            dt = v.to_pydatetime()
+            
+            # Validar rango de ClickHouse
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
+            
+            if dt < min_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {dt} -> {min_date}")
+                return min_date
+            elif dt > max_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} -> {max_date}")
+                return max_date
+                
+            return dt
         # numpy.datetime64 -> datetime (naive)
         if isinstance(v, np.datetime64):
             ts = pd.Timestamp(v)
             if ts.tzinfo is not None:
                 ts = ts.tz_localize(None)
-            return ts.to_pydatetime()
+            dt = ts.to_pydatetime()
+            
+            # Validar rango de ClickHouse
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
+            
+            if dt < min_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {dt} -> {min_date}")
+                return min_date
+            elif dt > max_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} -> {max_date}")
+                return max_date
+                
+            return dt
         # date -> datetime (00:00:00)
         if isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
-            return datetime.datetime(v.year, v.month, v.day)
+            dt = datetime.datetime(v.year, v.month, v.day)
+            
+            # Validar rango de ClickHouse
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
+            
+            if dt < min_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {dt} -> {min_date}")
+                return min_date
+            elif dt > max_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} -> {max_date}")
+                return max_date
+                
+            return dt
         # datetime (naive)
         if isinstance(v, datetime.datetime):
             if v.tzinfo is not None:
                 v = v.replace(tzinfo=None)
+            
+            # Validar rango de ClickHouse: usar epoch Unix como fecha mínima segura
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
+            
+            if v < min_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {v} -> {min_date}")
+                return min_date
+            elif v > max_date:
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {v} -> {max_date}")
+                return max_date
+            
             return v
         # Números float/int estándar (incluyendo numpy)
         if isinstance(v, (float, int, np.integer, np.floating)):

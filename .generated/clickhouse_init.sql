@@ -1,3 +1,0 @@
-CREATE USER IF NOT EXISTS etl IDENTIFIED WITH plaintext_password BY 'Et1Ingest!';
-CREATE DATABASE IF NOT EXISTS fgeo_archivos;
-GRANT SELECT, INSERT, CREATE, ALTER ON fgeo_archivos.* TO etl;
