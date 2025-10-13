@@ -191,6 +191,58 @@ def _parse_maybe_datetime_series(s: pd.Series) -> pd.Series:
     return s
 
 
+def process_mysql_date_columns(df: pd.DataFrame, mysql_column_info: dict) -> pd.DataFrame:
+    """
+    Procesa específicamente campos DATE de MySQL para compatibilidad con Superset.
+    
+    Estrategia:
+    1. Campos DATE inválidos (1900-01-01, 0000-00-00) → NULL
+    2. Campos DATE válidos → mantener como fecha
+    3. Usar Date en lugar de DateTime cuando es apropiado
+    4. Logging detallado para troubleshooting
+    """
+    for col in df.columns:
+        mysql_type = mysql_column_info.get(col, '').lower()
+        
+        # Solo procesar campos DATE específicos de MySQL
+        if mysql_type and 'date' in mysql_type and not any(x in mysql_type for x in ['datetime', 'timestamp']):
+            log.info(f"🗓️ Procesando campo DATE MySQL: {col} (tipo: {mysql_type})")
+            
+            if str(df[col].dtype).startswith('datetime64'):
+                series = df[col]
+                processed_dates = []
+                
+                for i, value in enumerate(series):
+                    if pd.isna(value) or value is None:
+                        processed_dates.append(None)
+                        continue
+                    
+                    # Convertir a datetime si es necesario
+                    if isinstance(value, pd.Timestamp):
+                        dt = value.to_pydatetime()
+                    elif isinstance(value, datetime.datetime):
+                        dt = value
+                    elif isinstance(value, datetime.date):
+                        dt = datetime.datetime(value.year, value.month, value.day)
+                    else:
+                        processed_dates.append(None)
+                        continue
+                    
+                    # Validar fechas problemáticas comunes en MySQL para Superset
+                    if dt.year <= 1900 or dt.year >= 2100:
+                        log.info(f"🚫 Fecha inválida en {col}[{i}]: {dt} → NULL (fuera de rango útil para Superset)")
+                        processed_dates.append(None)
+                    else:
+                        # Fecha válida - mantener como date para mejor compatibilidad Superset
+                        processed_dates.append(dt.date())
+                
+                # Asignar la serie procesada
+                df[col] = processed_dates
+                log.info(f"✅ Campo {col} procesado: {len([x for x in processed_dates if x is not None])} fechas válidas, {len([x for x in processed_dates if x is None])} NULLs")
+    
+    return df
+
+
 def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza dataframe para ClickHouse preservando fidelidad de tipos MySQL:
@@ -579,16 +631,16 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
                 v = v.tz_localize(None)
             dt = v.to_pydatetime()
             
-            # Validar rango de ClickHouse
-            min_date = datetime.datetime(1900, 1, 2, 0, 0, 0)
+            # Validar rango útil - usar NULL para fechas inválidas
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)  # Epoch Unix
             max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
             
             if dt < min_date:
-                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {dt} -> {min_date}")
-                return min_date
+                log.warning(f"🚨 Fecha fuera de rango útil (muy antigua): {dt} → NULL")
+                return None
             elif dt > max_date:
-                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} -> {max_date}")
-                return max_date
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} → NULL")
+                return None
                 
             return dt
         # numpy.datetime64 -> datetime (naive)
@@ -610,20 +662,20 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
                 return max_date
                 
             return dt
-        # date -> datetime (00:00:00)
+        # date -> datetime (00:00:00)  
         if isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
             dt = datetime.datetime(v.year, v.month, v.day)
             
-            # Validar rango de ClickHouse
-            min_date = datetime.datetime(1900, 1, 2, 0, 0, 0)
+            # Validar rango útil - usar NULL para fechas inválidas
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)  # Epoch Unix
             max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
             
             if dt < min_date:
-                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {dt} -> {min_date}")
-                return min_date
+                log.warning(f"🚨 Fecha fuera de rango útil (muy antigua): {dt} → NULL")
+                return None
             elif dt > max_date:
-                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} -> {max_date}")
-                return max_date
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {dt} → NULL")
+                return None
                 
             return dt
         # datetime (naive)
@@ -631,16 +683,16 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
             if v.tzinfo is not None:
                 v = v.replace(tzinfo=None)
             
-            # Validar rango de ClickHouse: usar epoch Unix como fecha mínima segura
-            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            # Validar rango útil - usar NULL para fechas inválidas
+            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)  # Epoch Unix
             max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
             
             if v < min_date:
-                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy antigua): {v} -> {min_date}")
-                return min_date
+                log.warning(f"🚨 Fecha fuera de rango útil (muy antigua): {v} → NULL")
+                return None
             elif v > max_date:
-                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {v} -> {max_date}")
-                return max_date
+                log.warning(f"🚨 Fecha fuera de rango ClickHouse (muy futura): {v} → NULL")
+                return None
             
             return v
         # Números float/int estándar (incluyendo numpy)
@@ -988,7 +1040,11 @@ def insert_df(
     # 🔹 Asegurar que TODAS las columnas de fecha queden como datetime (o None)
     df = coerce_datetime_columns(df)
 
-    # 🔹 Normalización general para ClickHouse (bools, Decimal, NaN/NaT → None, etc.)
+    # �️ Procesamiento especializado de campos DATE MySQL para Superset
+    if column_types:
+        df = process_mysql_date_columns(df, column_types)
+
+    # �🔹 Normalización general para ClickHouse (bools, Decimal, NaN/NaT → None, etc.)
     df = normalize_for_clickhouse(df)
     
     # ✅ DEBUG: Ver qué tipos tenemos después de normalizar
