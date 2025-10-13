@@ -454,8 +454,8 @@ def preprocess_dataframe_for_clickhouse(df: pd.DataFrame, primary_keys: set = No
         mysql_type = column_types.get(col, '').lower()
         is_int_column = 'int' in mysql_type or dtype.startswith(('int', 'Int'))
         
-        # Debug logging para primera columna problemática conocida
-        if col in ['tipo', 'expedientestemp_id', 'indiciados_id', 'narcoticos_id']:
+        # Debug logging para columnas problemáticas conocidas
+        if col in ['tipo', 'expedientestemp_id', 'indiciados_id', 'narcoticos_id', 'numero']:
             log.info(f"🐛 DEBUG {col}: pandas_dtype='{dtype}', mysql_type='{mysql_type}', is_int_column={is_int_column}, is_pk={is_pk}")
         
         # Limpieza especial para columnas INT (primary keys y foreign keys)
@@ -467,6 +467,19 @@ def preprocess_dataframe_for_clickhouse(df: pd.DataFrame, primary_keys: set = No
         # Para columnas object que pueden contener números (pero no detectadas como INT)
         if dtype == 'object':
             series = df[col]
+            
+            # 🔥 PRESERVACIÓN DE TIPOS: Si MySQL dice que es VARCHAR/TEXT/CHAR, mantenerlo como string
+            if mysql_type and any(str_type in mysql_type for str_type in ['varchar', 'text', 'char']):
+                log.info(f"🔒 PRESERVANDO tipo MySQL: {col} como String (MySQL: {mysql_type})")
+                # Mantener estrictamente como string según MySQL
+                if is_pk:
+                    df[col] = [str(x) if x is not None else '' for x in series]
+                else:
+                    null_strings = {'nan', 'NaN', 'None', 'null', 'NULL', '', 'na', 'NA'}
+                    df[col] = [None if str(x).strip() in null_strings else str(x) for x in series]
+                continue
+            
+            # Solo para columnas SIN tipo MySQL explícito: intentar inferencia automática
             # Primero convertir todo a string para limpiar
             series_str = series.astype(str)
             
@@ -477,15 +490,18 @@ def preprocess_dataframe_for_clickhouse(df: pd.DataFrame, primary_keys: set = No
                 non_null_numeric = numeric_conversion.dropna()
                 if len(non_null_numeric) > 0 and (non_null_numeric % 1 == 0).all():
                     # Parece ser columna de enteros
+                    log.info(f"🔄 AUTO-CONVIRTIENDO: {col} de object -> integer (sin tipo MySQL)")
                     df[col] = clean_integer_column(series, is_primary_key=is_pk, column_name=col)
                 else:
                     # Es flotante
+                    log.info(f"🔄 AUTO-CONVIRTIENDO: {col} de object -> float (sin tipo MySQL)")
                     if is_pk:
                         df[col] = [0.0 if pd.isna(x) else float(x) for x in numeric_conversion]
                     else:
                         df[col] = [None if pd.isna(x) else float(x) for x in numeric_conversion]
             else:
                 # No es numérico, mantener como string
+                log.info(f"🔄 MANTENIENDO: {col} como String (sin tipo MySQL, no numérico)")
                 if is_pk:
                     df[col] = [str(x) if x is not None else '' for x in series]
                 else:
@@ -564,7 +580,7 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
             dt = v.to_pydatetime()
             
             # Validar rango de ClickHouse
-            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            min_date = datetime.datetime(1900, 1, 2, 0, 0, 0)
             max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
             
             if dt < min_date:
@@ -583,7 +599,7 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
             dt = ts.to_pydatetime()
             
             # Validar rango de ClickHouse
-            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            min_date = datetime.datetime(1900, 1, 2, 0, 0, 0)
             max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
             
             if dt < min_date:
@@ -599,7 +615,7 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
             dt = datetime.datetime(v.year, v.month, v.day)
             
             # Validar rango de ClickHouse
-            min_date = datetime.datetime(1970, 1, 1, 0, 0, 0)
+            min_date = datetime.datetime(1900, 1, 2, 0, 0, 0)
             max_date = datetime.datetime(2299, 12, 31, 23, 59, 59)
             
             if dt < min_date:
