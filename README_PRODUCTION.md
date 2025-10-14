@@ -80,6 +80,11 @@ DBZ_SERVER_NAME_PREFIX=dbserver           # Prefijo para tópicos
 DBZ_SNAPSHOT_MODE=initial                 # Modo snapshot inicial
 ```
 
+Nota importante sobre credenciales Debezium:
+- Las variables DBZ_DATABASE_HOSTNAME/PORT/USER/PASSWORD están DEPRECADAS y se ignoran.
+- Las credenciales y bases de datos de origen se toman exclusivamente de DB_CONNECTIONS (JSON en .env).
+- Mantén una sola fuente de verdad para evitar inconsistencias.
+
 #### Superset (Dashboard)
 ```bash
 SUPERSET_URL=http://superset:8088         # URL de Superset

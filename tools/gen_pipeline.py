@@ -112,12 +112,19 @@ def connector_payload(conn_name, conn, include_list):
     decimal_mode = os.getenv("DBZ_DECIMAL_MODE","string")
     binary_mode = os.getenv("DBZ_BINARY_MODE","base64")
     time_precision = os.getenv("DBZ_TIME_PRECISION","connect")
-    
-    # Usar configuración específica de MySQL desde .env si está disponible
-    db_hostname = os.getenv("DBZ_DATABASE_HOSTNAME", conn["host"])
-    db_port = os.getenv("DBZ_DATABASE_PORT", str(conn["port"]))
-    db_user = os.getenv("DBZ_DATABASE_USER", conn["user"])
-    db_password = os.getenv("DBZ_DATABASE_PASSWORD", conn["pass"])
+
+    # Credenciales de MySQL SIEMPRE desde DB_CONNECTIONS (deprecado usar DBZ_DATABASE_*)
+    # Nota: Si existen variables legacy, informar que serán ignoradas para evitar confusiones
+    legacy_dbz_vars = [
+        "DBZ_DATABASE_HOSTNAME", "DBZ_DATABASE_PORT",
+        "DBZ_DATABASE_USER", "DBZ_DATABASE_PASSWORD"
+    ]
+    if any(os.getenv(v) for v in legacy_dbz_vars):
+        print("[WARN] Variables DBZ_DATABASE_* detectadas pero ignoradas. Se usan credenciales de DB_CONNECTIONS.")
+    db_hostname = conn["host"]
+    db_port = str(conn["port"])
+    db_user = conn["user"]
+    db_password = conn["pass"]
     kafka_brokers = os.getenv("KAFKA_BROKERS", "kafka:9092")
     schema_history_topic = os.getenv("SCHEMA_HISTORY_INTERNAL_KAFKA_TOPIC", history_topic)
     schema_history_brokers = os.getenv("SCHEMA_HISTORY_INTERNAL_KAFKA_BOOTSTRAP_SERVERS", kafka_brokers)

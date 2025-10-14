@@ -1,104 +1,112 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import math
-import decimal
-import datetime
 import os
-import sys
-import json
-import argparse
+from urllib.parse import quote_plus
 import logging
 import re
-from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote_plus
-import warnings
-from pandas.core.dtypes.dtypes import DatetimeTZDtype
-import datetime
+import json
 import pandas as pd
+import datetime
 import numpy as np
-from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
-
-
-# Silencia el aviso de pandas "Could not infer format..." durante to_datetime
-warnings.filterwarnings(
-    "ignore",
-    message="Could not infer format, so each element will be parsed individually, falling back to `dateutil`.*",
-    category=UserWarning
-)
-
-# Silencia deprecations de pandas que no te afectan funcionalmente
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module=r"pandas.*"
-)
-
-# Cliente ClickHouse
-# clickhouse-connect es el que usamos (client.insert / client.query)
+import decimal
+import math
 import clickhouse_connect
+from sqlalchemy import create_engine, text, inspect
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import Engine
+from typing import List, Tuple, Optional
+import argparse
+import sys
 
 
-def resolve_source_url(args, env):
+def load_env_file() -> dict:
     """
-    Prioridad:
-      1) CLI: --source-url
-      2) ENV: SOURCE_URL
-      3) ENV: DB_CONNECTIONS con 'url'
-      4) ENV: DB_CONNECTIONS legado (host/port/user/pass/db) -> construye URL
-    Permite elegir conexión por nombre con --source-name o SOURCE_NAME (default: 'default').
+    Carga variables desde un archivo .env (prioridad) y si no existe, cae a os.environ.
+    Orden de búsqueda dentro del contenedor:
+      - /app/tools/.env (repo actual)
+      - /app/.env
+      - .env (cwd)
     """
-    # 1) CLI
+    env_vars = {}
+    candidates = [
+        "/app/tools/.env",
+        "/app/.env",
+        ".env",
+    ]
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    env_vars[k.strip()] = v.strip()
+            # Si encontramos uno válido, retornamos inmediatamente
+            return env_vars
+        except FileNotFoundError:
+            continue
+    # Fallback a entorno del proceso
+    return dict(os.environ)
+
+
+def resolve_source_url(args, env: dict | None = None) -> str | None:
+    """
+    Resuelve la URL de conexión al origen usando (en orden):
+      1) CLI --source-url
+      2) SOURCE_URL en .env
+      3) DB_CONNECTIONS (JSON) en .env
+    Siempre prefiere leer del archivo .env (dinámico) si no se provee 'env'.
+    """
+    if env is None:
+        env = load_env_file()
+
+    # 1) CLI directo
     su = getattr(args, "source_url", None)
     if su:
         return su
 
-    # 2) SOURCE_URL
+    # 2) SOURCE_URL del .env
     su = env.get("SOURCE_URL")
     if su:
         return su
 
-    # 3/4) DB_CONNECTIONS
+    # 3) DB_CONNECTIONS JSON
     dc_raw = env.get("DB_CONNECTIONS")
     if not dc_raw:
         return None
-
-    import json
     try:
         conns = json.loads(dc_raw)
     except Exception:
         return None
-
-    # Normalizar a lista
     if isinstance(conns, dict):
         conns = [conns]
     if not isinstance(conns, list) or not conns:
         return None
 
-    # Selección por nombre (si hay)
-    preferred = getattr(args, "source_name", None) or env.get("SOURCE_NAME") or "default"
+    preferred = (
+        getattr(args, "source_name", None)
+        or env.get("SOURCE_NAME")
+        or (conns[0].get("name") if isinstance(conns[0], dict) else None)
+        or "default"
+    )
     chosen = next((c for c in conns if c.get("name") == preferred), conns[0])
 
-    # 3) url directa
+    # URL directa si viene
     if chosen.get("url"):
         return chosen["url"]
 
-    # 4) legado: construir URL
+    # Construcción de URL tipo mysql+pymysql
     required = ("host", "user", "pass", "db")
     if not all(k in chosen for k in required):
         return None
-
     driver = chosen.get("driver", "mysql+pymysql")
-    host   = chosen["host"]
-    port   = chosen.get("port", 3306)
-    user   = chosen["user"]
-    pwd    = chosen["pass"]
-    db     = chosen["db"]
-
-    # Escapar user/pass por si tienen caracteres especiales
+    host = chosen["host"]
+    port = chosen.get("port", 3306)
+    user = chosen["user"]
+    pwd = chosen["pass"]
+    db = chosen["db"]
     return f"{driver}://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{db}"
 
 
@@ -131,22 +139,47 @@ class JSONFormatter(logging.Formatter):
         return json_module.dumps(log_data, ensure_ascii=False)
 
 
-# Configurar logging según formato especificado
+# Configurar logging según formato especificado (con salida a consola y archivo)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.getenv("LOG_FORMAT", "text").lower()
+LOG_DIR = os.getenv("LOG_DIR", "/app/logs")
 
+# Asegurar directorio de logs
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception:
+    # Si no se puede crear, caerá a solo consola
+    LOG_DIR = None
+
+# Armar handlers
+level = getattr(logging, LOG_LEVEL, logging.INFO)
+root_logger = logging.getLogger()
+root_logger.setLevel(level)
+
+# Evitar duplicados si ya existían handlers
+if root_logger.handlers:
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+stream_handler = logging.StreamHandler()
 if LOG_FORMAT == "json":
-    handler = logging.StreamHandler()
-    handler.setFormatter(JSONFormatter())
-    logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL, logging.INFO),
-        handlers=[handler]
-    )
+    formatter = JSONFormatter()
 else:
-    logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL, logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+stream_handler.setFormatter(formatter)
+root_logger.addHandler(stream_handler)
+
+# File handler opcional (si el directorio existe)
+if LOG_DIR:
+    log_filename = "ingest_runner.json" if LOG_FORMAT == "json" else "ingest_runner.log"
+    file_path = os.path.join(LOG_DIR, log_filename)
+    try:
+        file_handler = logging.FileHandler(file_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+    except Exception:
+        # Si no se puede abrir el archivo, continuar solo con consola
+        pass
 
 log = logging.getLogger(__name__)
 
@@ -202,7 +235,12 @@ def process_mysql_date_columns(df: pd.DataFrame, mysql_column_info: dict) -> pd.
     4. Logging detallado para troubleshooting
     """
     for col in df.columns:
-        mysql_type = mysql_column_info.get(col, '').lower()
+        # Manejar tanto formato dict como string para column_types
+        col_info = mysql_column_info.get(col, '')
+        if isinstance(col_info, dict):
+            mysql_type = col_info.get('mysql_type', '').lower()
+        else:
+            mysql_type = str(col_info).lower()
         
         # Solo procesar campos DATE específicos de MySQL
         if mysql_type and 'date' in mysql_type and not any(x in mysql_type for x in ['datetime', 'timestamp']):
@@ -235,8 +273,8 @@ def process_mysql_date_columns(df: pd.DataFrame, mysql_column_info: dict) -> pd.
                         log.info(f"🚫 Fecha inválida en {col}[{i}]: {dt} → NULL (fuera de rango útil para Superset)")
                         processed_dates.append(None)
                     else:
-                        # Fecha válida - mantener como date para mejor compatibilidad Superset
-                        processed_dates.append(dt.date())
+                        # Fecha válida - mantener como datetime para ClickHouse
+                        processed_dates.append(dt)
                 
                 # Asignar la serie procesada
                 df[col] = processed_dates
@@ -245,12 +283,49 @@ def process_mysql_date_columns(df: pd.DataFrame, mysql_column_info: dict) -> pd.
     return df
 
 
+def fix_encoding_issues(text):
+    """
+    Corrige problemas comunes de codificación en strings.
+    """
+    if text is None or not isinstance(text, str):
+        return text
+    
+    result = text
+    
+    # Corregir el patrón específico que vemos en los datos
+    result = result.replace('Actualizaci??n', 'Actualización')
+    result = result.replace('??', 'ó')
+    
+    # Otros patrones comunes de mal encoding
+    encoding_fixes = {
+        'Ã¡': 'á', 'Ã©': 'é', 'Ã­': 'í', 'Ã³': 'ó', 'Ãº': 'ú', 'Ã±': 'ñ'
+    }
+    
+    for broken, correct in encoding_fixes.items():
+        result = result.replace(broken, correct)
+    
+    # Intentar recodificación si aún hay caracteres problemáticos
+    try:
+        if any(char in result for char in ['Â', '¿', '¡']) and '??' not in result:
+            # Intentar decodificar/recodificar
+            result_bytes = result.encode('latin1', errors='ignore')
+            decoded = result_bytes.decode('utf-8', errors='ignore')
+            if len(decoded) > 0 and '??' not in decoded:
+                result = decoded
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        # Si falla la recodificación, mantener el original
+        pass
+    
+    return result
+
+
 def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza dataframe para ClickHouse preservando fidelidad de tipos MySQL:
     - Mantiene tipos originales definidos por get_mysql_column_types()
     - Solo procesa datetimes que YA son datetime
     - Limpia NaN/None sin alterar tipos de datos
+    - Corrige problemas de codificación en strings
     """
     if df is None or df.empty:
         return df
@@ -265,11 +340,12 @@ def normalize_for_clickhouse(df: pd.DataFrame) -> pd.DataFrame:
     # 2) Preservar tipos de pandas nullable (Int32, Int64, Float64, string)
     # Estos ya vienen correctos desde MySQL según get_mysql_column_types()
 
-    # 3) Solo limpiar NaN en object columns sin cambiar el tipo subyacente
+    # 3) Limpiar NaN y corregir codificación en object columns
     for col in out.columns:
         if out[col].dtype == 'object':
-            # Solo limpiar NaN manteniendo el tipo de datos original
+            # Limpiar NaN y corregir problemas de codificación
             out[col] = out[col].where(pd.notna(out[col]), None)
+            out[col] = out[col].apply(fix_encoding_issues)
     # 4) Limpiar y convertir tipos preservando fidelidad
     for col in out.columns:
         # Para columnas datetime, convertir a python datetime objects para ClickHouse
@@ -338,49 +414,45 @@ def _parse_datetime_series(s: pd.Series) -> pd.Series:
 
 def coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    datetime_column_patterns = [
-        r".*fecha.*", r".*date.*", r".*time.*", r".*captura.*", 
-        r".*created.*", r".*updated.*", r".*at$", r".*_at$",
-        r"f(echa|revision|validacion|actualizacion).*", r"hr.*", r".*timestamp.*"
-    ]
+    # Obtener tipos MySQL si están disponibles en el DataFrame
+    mysql_types = getattr(df, "_mysql_types", None)
     for col in out.columns:
         s = out[col]
-        is_likely_datetime = any(
-            re.match(pattern, col.lower()) 
-            for pattern in datetime_column_patterns
-        )
-        # Si ya es datetime, normalizar timezone
-        if pd.api.types.is_datetime64_any_dtype(s):
-            try:
-                if hasattr(s.dt, "tz") and s.dt.tz is not None:
-                    out[col] = s.dt.tz_localize(None)
-                else:
-                    out[col] = s
-            except Exception:
-                out[col] = s
-        # Si el nombre sugiere fecha, forzar conversión robusta
-        elif is_likely_datetime:
-            def robust_parse(val):
-                if pd.isna(val) or val is None:
-                    return None
-                sval = str(val).strip()
-                if sval in ["", "0000-00-00", "0000-00-00 00:00:00"]:
-                    return None
+        # Solo convertir si el tipo MySQL es datetime/date/timestamp
+        mysql_type = None
+        if mysql_types and col in mysql_types:
+            mysql_type = mysql_types[col].lower()
+        if mysql_type and any(t in mysql_type for t in ["datetime", "timestamp", "date"]):
+            # Si ya es datetime, normalizar timezone
+            if pd.api.types.is_datetime64_any_dtype(s):
                 try:
-                    dt = pd.to_datetime(sval, errors="coerce", utc=False)
-                    if pd.isna(dt):
-                        return None
-                    # Si es pandas.Timestamp, convertir a datetime
-                    if isinstance(dt, pd.Timestamp):
-                        return dt.to_pydatetime()
-                    if isinstance(dt, datetime.datetime):
-                        return dt
-                    return None
+                    if hasattr(s.dt, "tz") and s.dt.tz is not None:
+                        out[col] = s.dt.tz_localize(None)
+                    else:
+                        out[col] = s
                 except Exception:
-                    return None
-            out[col] = s.apply(robust_parse)
-        # Si es object pero no parece fecha, mantener el tipo original
-        elif s.dtype == object:
+                    out[col] = s
+            else:
+                def robust_parse(val):
+                    if pd.isna(val) or val is None:
+                        return None
+                    sval = str(val).strip()
+                    if sval in ["", "0000-00-00", "0000-00-00 00:00:00"]:
+                        return None
+                    try:
+                        dt = pd.to_datetime(sval, errors="coerce", utc=False)
+                        if pd.isna(dt):
+                            return None
+                        if isinstance(dt, pd.Timestamp):
+                            return dt.to_pydatetime()
+                        if isinstance(dt, datetime.datetime):
+                            return dt
+                        return None
+                    except Exception:
+                        return None
+                out[col] = s.apply(robust_parse)
+        else:
+            # Si el tipo MySQL es string, mantener como string aunque el nombre sugiera fecha
             out[col] = s.where(pd.notna(s), None)
     return out
 
@@ -504,30 +576,59 @@ def preprocess_dataframe_for_clickhouse(df: pd.DataFrame, primary_keys: set = No
     for col in df.columns:
         dtype = str(df[col].dtype)
         is_pk = col in primary_keys
-        mysql_type = column_types.get(col, '').lower()
+        # Obtener información de la columna MySQL
+        col_type_info = column_types.get(col, {})
+        if isinstance(col_type_info, dict):
+            mysql_type = col_type_info.get('mysql_type', '').lower()
+            nullable = col_type_info.get('nullable', True)
+            is_mysql_pk = col_type_info.get('primary_key', False)
+            log.info(f"🔍 DEBUG column_types para {col}: {col_type_info}")
+        else:
+            # Fallback para formato anterior (solo string)
+            mysql_type = str(col_type_info).lower()
+            nullable = True
+            is_mysql_pk = False
+            log.info(f"🔍 DEBUG column_types (fallback) para {col}: {col_type_info}")
+        
         is_int_column = 'int' in mysql_type or dtype.startswith(('int', 'Int'))
+        # Determinar si la columna no debe ser nullable
+        is_non_nullable = is_pk or is_mysql_pk or not nullable
         
-        # Debug logging para columnas problemáticas conocidas
-        if col in ['tipo', 'expedientestemp_id', 'indiciados_id', 'narcoticos_id', 'numero']:
-            log.info(f"🐛 DEBUG {col}: pandas_dtype='{dtype}', mysql_type='{mysql_type}', is_int_column={is_int_column}, is_pk={is_pk}")
-        
-        # Limpieza especial para columnas INT (primary keys y foreign keys)
         if is_int_column:
-            log.info(f"🔧 Procesando columna INT detectada: {col} (MySQL: {mysql_type}, PK: {is_pk})")
-            df[col] = clean_integer_column(df[col], is_primary_key=is_pk, column_name=col)
+            # Log para depuración
+            log.info(f"🔧 Procesando columna INT detectada: {col} (MySQL: {mysql_type}, PK: {is_pk}, NOT NULL: {is_non_nullable})")
+            df[col] = clean_integer_column(df[col], is_primary_key=is_non_nullable, column_name=col)
             continue
         
-        # Para columnas object que pueden contener números (pero no detectadas como INT)
-        if dtype == 'object':
+        # Para columnas object/string que pueden contener números (pero no detectadas como INT)
+        if dtype == 'object' or dtype == 'string':
             series = df[col]
             
             # 🔥 PRESERVACIÓN DE TIPOS: Si MySQL dice que es VARCHAR/TEXT/CHAR, mantenerlo como string
             if mysql_type and any(str_type in mysql_type for str_type in ['varchar', 'text', 'char']):
                 log.info(f"🔒 PRESERVANDO tipo MySQL: {col} como String (MySQL: {mysql_type})")
+                log.info(f"🔧 DEBUG: Analizando condiciones para {col} - is_pk={is_pk}, is_non_nullable={is_non_nullable}")
+                
+                # Ya tenemos is_non_nullable calculado arriba
+                
                 # Mantener estrictamente como string según MySQL
                 if is_pk:
-                    df[col] = [str(x) if x is not None else '' for x in series]
+                    # PKs nunca pueden ser NULL - usar string vacía o valor por defecto
+                    df[col] = [str(x) if x is not None else f'default_{col}_pk' for x in series]
+                elif is_non_nullable:
+                    # Columnas NOT NULL - convertir NULL/vacío a valor por defecto
+                    log.info(f"🔧 DEBUG: Procesando columna NOT NULL {col} - is_pk={is_pk}, is_mysql_pk={is_mysql_pk}, nullable={nullable}")
+                    def clean_not_null_string(x):
+                        if x is None or pd.isna(x):
+                            return f'N/A'  # Valor por defecto para campos obligatorios
+                        str_val = str(x).strip()
+                        if str_val in {'nan', 'NaN', 'None', 'null', 'NULL', '', 'na', 'NA'}:
+                            return f'N/A'  # Valor por defecto para campos obligatorios
+                        return str_val
+                    df[col] = [clean_not_null_string(x) for x in series]
+                    log.info(f"🔧 Columna NOT NULL {col}: cadenas vacías/NULL → 'N/A'")
                 else:
+                    # Columnas nullable - convertir valores vacíos a None
                     null_strings = {'nan', 'NaN', 'None', 'null', 'NULL', '', 'na', 'NA'}
                     df[col] = [None if str(x).strip() in null_strings else str(x) for x in series]
                 continue
@@ -581,6 +682,61 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
     """
     # Preprocesar DataFrame para mejor manejo de nulos
     df = preprocess_dataframe_for_clickhouse(df, primary_keys, column_types)
+
+    # Enforce: columnas enteras deben ser int nativo (no float) para evitar errores con Nullable(Int32)
+    try:
+        int_like_cols = set()
+        if column_types and isinstance(column_types, dict):
+            for col_name, col_info in column_types.items():
+                if isinstance(col_info, dict):
+                    mt_l = col_info.get('mysql_type', '').lower()
+                else:
+                    mt_l = str(col_info).lower()
+                if ("int" in mt_l or "bigint" in mt_l) and col_name in df.columns:
+                    int_like_cols.add(col_name)
+        # fallback por dtype
+        for col in df.columns:
+            dts = str(df[col].dtype)
+            if dts.startswith(("int", "Int")):
+                int_like_cols.add(col)
+
+        for col in int_like_cols:
+            is_pk = bool(primary_keys and col in primary_keys)
+            def _coerce_int(v):
+                if v is None:
+                    return 0 if is_pk else None
+                try:
+                    if pd.isna(v):
+                        return 0 if is_pk else None
+                except Exception:
+                    pass
+                if isinstance(v, (int, np.integer)):
+                    return int(v)
+                if isinstance(v, (float, np.floating)):
+                    fv = float(v)
+                    if math.isnan(fv) or math.isinf(fv):
+                        return 0 if is_pk else None
+                    return int(fv) if fv.is_integer() else (0 if is_pk else None)
+                if isinstance(v, decimal.Decimal):
+                    return int(v) if v.as_tuple().exponent == 0 else (0 if is_pk else None)
+                if isinstance(v, str):
+                    s = v.strip()
+                    if s == "" or s.lower() in {"null", "none", "nan"}:
+                        return 0 if is_pk else None
+                    try:
+                        if "." in s:
+                            fv = float(s)
+                            return int(fv) if fv.is_integer() else (0 if is_pk else None)
+                        return int(s)
+                    except Exception:
+                        return 0 if is_pk else None
+                try:
+                    return int(v)
+                except Exception:
+                    return 0 if is_pk else None
+            df[col] = df[col].apply(_coerce_int)
+    except Exception:
+        pass
     cols = list(df.columns)
 
     def cell(v):
@@ -700,11 +856,14 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
         if isinstance(v, (float, int, np.integer, np.floating)):
             if isinstance(v, (float, np.floating)) and (np.isnan(v) or np.isinf(v)):
                 return None
-            # Convertir numpy a Python nativo
+            # Preferir int si el valor es entero
+            if isinstance(v, (float, np.floating)):
+                fv = float(v)
+                if fv.is_integer():
+                    return int(fv)
+                return fv
             if isinstance(v, np.integer):
                 return int(v)
-            elif isinstance(v, np.floating):
-                return float(v)
             return v
         
         # Cadenas "fecha cero" típicas de MySQL -> None
@@ -811,6 +970,64 @@ def dataframe_to_clickhouse_rows(df: pd.DataFrame, primary_keys: set = None, col
             return None
 
     data = [tuple(cell(df.at[i, c]) for c in cols) for i in df.index]
+
+    # Post-proceso: asegurar ints en columnas tipo entero
+    try:
+        int_like_idx = set()
+        if column_types and isinstance(column_types, dict):
+            for idx, col in enumerate(cols):
+                col_info = column_types.get(col, "")
+                if isinstance(col_info, dict):
+                    mt = col_info.get('mysql_type', '').lower()
+                else:
+                    mt = str(col_info).lower()
+                if "bigint" in mt or ("int" in mt and "tinyint(1)" not in mt):
+                    int_like_idx.add(idx)
+        # Fallback: detectar por nombre/dtype si column_types no trae info suficiente
+        if not int_like_idx:
+            for idx, col in enumerate(cols):
+                s = df[col]
+                if str(s.dtype).startswith(("int", "Int")):
+                    int_like_idx.add(idx)
+
+        if int_like_idx:
+            fixed = []
+            for row in data:
+                row_list = list(row)
+                for j in int_like_idx:
+                    v = row_list[j]
+                    if v is None:
+                        continue
+                    # Convertir floats representando enteros → int; otros floats → None
+                    if isinstance(v, (float, np.floating)):
+                        if not (math.isnan(v) or math.isinf(v)) and float(v).is_integer():
+                            row_list[j] = int(v)
+                        else:
+                            row_list[j] = None
+                    elif isinstance(v, str):
+                        vs = v.strip()
+                        if vs == "" or vs.lower() in {"null", "none", "nan"}:
+                            row_list[j] = None
+                        else:
+                            try:
+                                if "." in vs:
+                                    fv = float(vs)
+                                    row_list[j] = int(fv) if fv.is_integer() else None
+                                else:
+                                    row_list[j] = int(vs)
+                            except Exception:
+                                row_list[j] = None
+                    elif isinstance(v, np.integer):
+                        row_list[j] = int(v)
+                    elif isinstance(v, decimal.Decimal):
+                        row_list[j] = int(v) if v.as_tuple().exponent == 0 else None
+                    # otros tipos se dejan tal cual (int, None, etc.)
+                fixed.append(tuple(row_list))
+            data = fixed
+    except Exception:
+        # Fallo silencioso del postproceso no debe bloquear
+        pass
+
     return data, cols
 
 
@@ -901,6 +1118,38 @@ def map_sqlalchemy_to_ch(ins: inspect, engine: Engine, schema: str, table: str) 
         pk_info = ins.get_pk_constraint(table, schema=schema)
         primary_keys = set(pk_info.get('constrained_columns', [])) if pk_info else set()
         
+        # 🔧 OBTENER INFORMACIÓN REAL DE NULLABILITY desde MySQL
+        nullable_info = {}
+        try:
+            # Usar conexión directa para obtener información precisa de DESCRIBE
+            import pymysql
+            url = engine.url
+            mysql_conn = pymysql.connect(
+                host=url.host,
+                port=url.port or 3306,
+                user=url.username,
+                password=url.password,
+                database=url.database,
+                charset='utf8mb4'
+            )
+            
+            cursor = mysql_conn.cursor()
+            cursor.execute(f"DESCRIBE `{schema}`.`{table}`")
+            describe_results = cursor.fetchall()
+            
+            for row in describe_results:
+                col_name = row[0]
+                is_nullable = row[2].upper() == 'YES'  # NULL column: YES/NO
+                nullable_info[col_name] = is_nullable
+                
+            cursor.close()
+            mysql_conn.close()
+            
+            log.info(f"📋 Nullability real de MySQL para {schema}.{table}: {nullable_info}")
+            
+        except Exception as e:
+            log.warning(f"⚠️ No se pudo obtener nullability real de MySQL: {e}")
+        
     except Exception as e:
         raise RuntimeError(f"No se pudieron leer columnas de {schema}.{table}: {e}") from e
 
@@ -909,17 +1158,17 @@ def map_sqlalchemy_to_ch(ins: inspect, engine: Engine, schema: str, table: str) 
         type_ = str(c["type"]).lower()
         is_primary_key = name in primary_keys
 
-        # heurística simple de mapeo
-        if "int" in type_:
-            ch_type = "Int32"
-        elif "bigint" in type_:
-            ch_type = "Int64"
-        elif "smallint" in type_:
-            ch_type = "Int16"
-        elif "tinyint(1)" in type_ or "bool" in type_:
+        # heurística simple de mapeo (orden: casos específicos primero)
+        if "tinyint(1)" in type_ or "bool" in type_:
             ch_type = "Int8"
         elif "tinyint" in type_:
             ch_type = "Int8"
+        elif "smallint" in type_:
+            ch_type = "Int16"
+        elif "bigint" in type_:
+            ch_type = "Int64"
+        elif "int" in type_:
+            ch_type = "Int32"
         elif "float" in type_ or "real" in type_:
             ch_type = "Float32"
         elif "double" in type_ or "numeric" in type_:
@@ -932,8 +1181,13 @@ def map_sqlalchemy_to_ch(ins: inspect, engine: Engine, schema: str, table: str) 
         else:
             ch_type = "String"
 
-        # 🔑 IMPORTANTE: Los campos PRIMARY KEY nunca son nullable
-        nullable = c.get("nullable", True) and not is_primary_key
+        # 🔑 IMPORTANTE: Usar información real de nullability de MySQL
+        # Prioridad: 1) MySQL DESCRIBE, 2) PRIMARY KEY (nunca nullable), 3) SQLAlchemy fallback
+        if name in nullable_info:
+            nullable = nullable_info[name] and not is_primary_key
+        else:
+            nullable = c.get("nullable", True) and not is_primary_key
+            
         if nullable and not ch_type.startswith("Nullable("):
             ch_type = f"Nullable({ch_type})"
 
@@ -942,6 +1196,8 @@ def map_sqlalchemy_to_ch(ins: inspect, engine: Engine, schema: str, table: str) 
         # Log para debugging
         if is_primary_key:
             log.info(f"Campo PRIMARY KEY detectado: {name} -> {ch_type} (NOT NULL)")
+        elif not nullable:
+            log.info(f"Campo NOT NULL detectado: {name} -> {ch_type} (NOT NULL según MySQL)")
     
     return cols
 
@@ -1081,7 +1337,8 @@ def insert_df(
 # ---------------------------------
 def get_mysql_column_types(connection, schema: str, table: str) -> dict:
     """
-    Obtiene los tipos exactos de las columnas MySQL para preservar fidelidad
+    Obtiene los tipos exactos de las columnas MySQL para preservar fidelidad,
+    incluyendo información de nullability
     """
     cursor = connection.cursor()
     try:
@@ -1092,6 +1349,8 @@ def get_mysql_column_types(connection, schema: str, table: str) -> dict:
         for col_info in columns_info:
             col_name = col_info[0]
             mysql_type = col_info[1].lower()
+            is_nullable = col_info[2].upper() == 'YES'  # NULL column: YES/NO
+            is_primary_key = col_info[3].upper() == 'PRI'  # Key column: PRI/UNI/MUL/''
             
             # Mapear tipos MySQL a pandas dtypes preservando fidelidad
             if 'varchar' in mysql_type or 'char' in mysql_type or 'text' in mysql_type:
@@ -1115,7 +1374,13 @@ def get_mysql_column_types(connection, schema: str, table: str) -> dict:
             else:
                 pandas_dtype = 'string'  # Default fallback
                 
-            type_mapping[col_name] = pandas_dtype
+            # Almacenar información completa de la columna
+            type_mapping[col_name] = {
+                'pandas_dtype': pandas_dtype,
+                'mysql_type': mysql_type,
+                'nullable': is_nullable,
+                'primary_key': is_primary_key
+            }
             
         return type_mapping
     finally:
@@ -1131,27 +1396,38 @@ def read_table_in_chunks(engine: Engine, schema: str, table: str, chunksize: int
     import pymysql
     url = engine.url
     
-    # Extraer parámetros de conexión de la URL
+    # Extraer parámetros de conexión de la URL con codificación robusta
     connection = pymysql.connect(
         host=url.host,
         port=url.port or 3306,
         user=url.username,
         password=url.password,
         database=url.database,
-        charset='utf8mb4'
+        charset='utf8mb4',
+        use_unicode=True,
+        init_command="SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
     )
     
     try:
         # Obtener tipos exactos de MySQL para preservar fidelidad
         column_types = get_mysql_column_types(connection, schema, table)
-        log.info(f"📋 Tipos detectados para {schema}.{table}: {column_types}")
+        
+        # Extraer solo los tipos pandas para pd.read_sql
+        pandas_dtypes = {}
+        for col, info in column_types.items():
+            if isinstance(info, dict):
+                pandas_dtypes[col] = info['pandas_dtype']
+            else:
+                pandas_dtypes[col] = info  # Fallback para formato anterior
+        
+        log.info(f"📋 Tipos detectados para {schema}.{table}: {pandas_dtypes}")
         
         # Leer con tipos específicos para mantener fidelidad
         try:
             if chunksize:
-                return pd.read_sql(base_sql, con=connection, chunksize=chunksize, dtype=column_types)
+                return pd.read_sql(base_sql, con=connection, chunksize=chunksize, dtype=pandas_dtypes)
             else:
-                return pd.read_sql(base_sql, con=connection, dtype=column_types)
+                return pd.read_sql(base_sql, con=connection, dtype=pandas_dtypes)
         except Exception as e:
             log.warning(f"⚠️ Error usando tipos específicos, leyendo con inferencia automática: {e}")
             # Fallback: leer sin tipos específicos
@@ -1250,8 +1526,43 @@ def ingest_one_table(
         except Exception as pk_e:
             log.warning(f"No se pudieron obtener primary keys de {schema}.{table}: {pk_e}")
         
-        # Crear diccionario de tipos de columnas MySQL
-        column_types = {col['name']: str(col['type']) for col in cols_info}
+        # Crear diccionario completo de tipos de columnas MySQL con nullability
+        # Usar la información completa que ya tenemos de SQLAlchemy
+        column_types = {}
+        for col in cols_info:
+            col_name = col['name']
+            mysql_type_str = str(col['type']).lower()
+            is_nullable = col.get('nullable', True)
+            is_pk = col_name in primary_keys
+            
+            # Mapear a pandas dtype como hace get_mysql_column_types
+            if 'varchar' in mysql_type_str or 'char' in mysql_type_str or 'text' in mysql_type_str:
+                pandas_dtype = 'string'
+            elif 'int' in mysql_type_str and 'bigint' not in mysql_type_str:
+                pandas_dtype = 'Int32'
+            elif 'bigint' in mysql_type_str:
+                pandas_dtype = 'Int64'
+            elif 'decimal' in mysql_type_str or 'numeric' in mysql_type_str:
+                pandas_dtype = 'string'
+            elif 'float' in mysql_type_str or 'double' in mysql_type_str:
+                pandas_dtype = 'Float64'
+            elif 'datetime' in mysql_type_str or 'timestamp' in mysql_type_str:
+                pandas_dtype = 'datetime64[ns]'
+            elif mysql_type_str.startswith('date'):
+                pandas_dtype = 'datetime64[ns]'
+            elif 'time' in mysql_type_str:
+                pandas_dtype = 'object'
+            elif 'bool' in mysql_type_str or mysql_type_str.startswith('tinyint(1)'):
+                pandas_dtype = 'boolean'
+            else:
+                pandas_dtype = 'string'
+            
+            column_types[col_name] = {
+                'pandas_dtype': pandas_dtype,
+                'mysql_type': mysql_type_str,
+                'nullable': is_nullable,
+                'primary_key': is_pk
+            }
         
         print(f"Estructura de {schema}.{table}:")
         log.info(f"Estructura de {schema}.{table}:")
@@ -1389,62 +1700,213 @@ def list_tables(engine: Engine, schemas: List[str]) -> List[Tuple[str, str]]:
 
 
 def run_audit(mysql_url: str, ch_database: str):
-    """Ejecuta auditoría comparando registros entre MySQL y ClickHouse"""
+    """Ejecuta auditoría comparando registros entre MySQL y ClickHouse.
+
+    NOTA: El parámetro ch_database se mantiene por compatibilidad pero las tablas
+    ingeridas actualmente se crean en la base de datos del *schema* original
+    (ej: schema 'archivos') con el patrón:
+        {schema}.src__{source_name}__{schema}__{table}
+
+    Esta función detecta dinámicamente source_name derivándolo de la URL MySQL
+    y construye los nombres de tablas ClickHouse acorde al prefijo configurado.
+    """
     try:
         import clickhouse_connect
+        from sqlalchemy.engine.url import make_url
+
+        # Detectar source_name desde la URL para mayor precisión
+        try:
+            parsed_url = make_url(mysql_url)
+            # Usar el nombre de la base de datos como source_name si está disponible
+            source_name = parsed_url.database or os.getenv("SOURCE_NAME", "default")
+        except:
+            source_name = os.getenv("SOURCE_NAME", "default")
         
-        # Conectar a MySQL
+        ch_prefix_template = os.getenv("CH_PREFIX", "src__{source}__")
+        ch_prefix = ch_prefix_template.format(source=source_name)
+
+        # Conectar a MySQL y obtener tablas
         mysql_engine = create_engine(mysql_url)
+        mysql_db = mysql_engine.url.database or ""
         with mysql_engine.connect() as conn:
-            mysql_tables = conn.execute("SHOW TABLES").fetchall()
-        mysql_tables = [row[0] for row in mysql_tables]
-        
-        # Conectar a ClickHouse
+            mysql_tables_rows = conn.execute("SHOW TABLES").fetchall()
+            mysql_tables = [row[0] for row in mysql_tables_rows]
+
+        # Cliente ClickHouse
         ch_host = os.getenv("CH_HOST", "clickhouse")
         ch_port = int(os.getenv("CH_PORT", "8123"))
         ch_user = os.getenv("CH_USER", "etl")
         ch_pass = os.getenv("CH_PASSWORD", "")
         ch_client = clickhouse_connect.get_client(host=ch_host, port=ch_port, username=ch_user, password=ch_pass)
-        
+
         log.info(f"{'Tabla':40} | {'MySQL':>10} | {'ClickHouse':>12} | {'Diferencia':>12}")
         log.info("-" * 80)
-        
+
         total_mysql = 0
         total_ch = 0
-        
+
+        # Pre-cargar listado de tablas ClickHouse por database (usamos system.tables)
+        ch_tables_map = {}
+        try:
+            # Traer todas las tablas de cada posible database relevante (mysql_db y ch_database por compatibilidad)
+            dbs_to_scan = {mysql_db, ch_database}
+            # Usar literal para evitar problemas con parámetros
+            dbs_list = "','".join(dbs_to_scan)
+            tbl_rows = ch_client.query(f"SELECT database,name FROM system.tables WHERE database IN ('{dbs_list}')").result_rows
+            for dbname, tblname in tbl_rows:
+                ch_tables_map.setdefault(dbname, set()).add(tblname)
+            log.info(f"📊 Tablas detectadas en ClickHouse para auditoría: { {k: list(v) for k,v in ch_tables_map.items()} }")
+        except Exception as e:
+            log.info(f"⚠️ No se pudo listar system.tables, usando fallback directo: {e}")
+            # Fallback: si no podemos listar, intentaremos consultas directas
+
         for table in mysql_tables:
-            # Contar registros en MySQL
+            # Conteo MySQL usando ejecución directa para evitar anomalías con pandas.read_sql
             try:
-                mysql_count = pd.read_sql(f"SELECT COUNT(*) as n FROM `{table}`", mysql_url)['n'][0]
-            except Exception:
+                from sqlalchemy import text as _sql_text
+                with mysql_engine.connect() as conn:
+                    # Usar nombre calificado por si la conexión cambia de DB por pool
+                    mysql_count = conn.execute(_sql_text(f"SELECT COUNT(*) FROM `{mysql_db}`.`{table}`")).scalar() or 0
+            except Exception as e:
+                log.debug(f"Fallo COUNT MySQL para {table}: {e}")
                 mysql_count = 0
-            
-            # Contar registros en ClickHouse
-                ch_table = f"{ch_database}.archivos_{table}"
-            try:
-                ch_count = ch_client.query(f"SELECT COUNT(*) FROM {ch_table}").result_rows[0][0]
-            except Exception:
-                ch_count = 0
-            
+
+            # Resolver nombre en ClickHouse: patrón real creado por ingest_one_table:
+            # ch_table = f"{ch_prefix}{schema}__{table}" con ch_database = schema
+            # Aquí mysql_db actúa como schema
+            # In ingest: ch_table = f"{ch_prefix}{schema}__{table}" with ch_prefix = 'src__{source}__'
+            # Actual observed: src__archivos__archivos__{table}
+            # So we need: ch_prefix + mysql_db + '__' + table
+            candidates = [f"{ch_prefix}{mysql_db}__{table}"]
+            ch_count = 0
+            found = False
+            log.info(f"🔍 Buscando {table} → candidato: {candidates[0]} en DB {mysql_db}")
+            for cand in candidates:
+                # Si no tenemos mapeo, intentar directamente (fallback)
+                if not ch_tables_map or cand in ch_tables_map.get(mysql_db, set()):
+                    try:
+                        # No usar backticks: nombre ya es válido y backticks pueden causar error en CH client
+                        ch_count = ch_client.query(f"SELECT COUNT(*) FROM {mysql_db}.{cand}").result_rows[0][0]
+                        found = True
+                        log.info(f"✔ Conteo ClickHouse OK {mysql_db}.{cand} = {ch_count}")
+                        break
+                    except Exception as e:
+                        log.info(f"❌ Fallo COUNT en ClickHouse para {mysql_db}.{cand}: {e}")
+                else:
+                    log.info(f"⚠️ Candidato {cand} NO encontrado en mapeo de tablas para DB {mysql_db}")
+            if not found:
+                log.info(f"❌ Tabla ClickHouse no encontrada para {table} (candidatos: {candidates})")
+
             diff = ch_count - mysql_count
             log.info(f"{table:40} | {mysql_count:>10} | {ch_count:>12} | {diff:>12}")
-            
             total_mysql += mysql_count
             total_ch += ch_count
-        
+
         log.info("-" * 80)
         total_diff = total_ch - total_mysql
         log.info(f"{'TOTAL':40} | {total_mysql:>10} | {total_ch:>12} | {total_diff:>12}")
-        
-        if total_diff == 0:
-            log.info(f"✅ Auditoría exitosa: {total_mysql} registros migrados correctamente")
+
+        if len(mysql_tables) == 0:
+            log.warning("⚠️ No se encontraron tablas en MySQL para auditar")
+        elif total_mysql == 0:
+            log.warning("⚠️ Las tablas MySQL están vacías O no se pudieron contar (ver DEBUG)")
+        elif total_diff == 0:
+            log.info(f"✅ Auditoría exitosa: {total_mysql} registros verificados correctamente")
+            log.info(f"📊 {len(mysql_tables)} tablas auditadas, todas coinciden")
         else:
-            log.warning(f"⚠️  Diferencia: {total_diff} registros")
-            
+            log.warning(f"⚠️ Discrepancia encontrada: {total_diff} registros de diferencia")
+            if total_diff > 0:
+                log.warning(f"   ClickHouse tiene {total_diff} registros MÁS que MySQL")
+            else:
+                log.warning(f"   ClickHouse tiene {abs(total_diff)} registros MENOS que MySQL")
+
     except ImportError:
         log.warning("clickhouse_connect no disponible para auditoría")
     except Exception as e:
         log.warning(f"Error en auditoría: {e}")
+
+
+def validate_connections(env_vars: dict):
+    """Valida conectividad a todas las conexiones definidas dinámicamente.
+
+    Prioriza:
+      1) Conexión principal resuelta (SOURCE_URL / --source-url / DB_CONNECTIONS)
+      2) Todas las conexiones listadas en DB_CONNECTIONS (formato NAME=URL;...)
+    """
+    tested = []
+    failures = []
+    db_conns = env_vars.get("DB_CONNECTIONS", "").strip()
+    mapping = {}
+    # DB_CONNECTIONS admite 2 formatos: JSON (lista de dicts) o pares NAME=URL;NAME2=URL2
+    if db_conns:
+        if db_conns.startswith("["):
+            # Intentar parsear como JSON
+            try:
+                import json
+                parsed = json.loads(db_conns)
+                for entry in parsed:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = entry.get("name") or entry.get("alias") or entry.get("db")
+                    if not name:
+                        continue
+                    # Construir URL SQLAlchemy basado en 'type' (mysql) y campos
+                    typ = entry.get("type", "mysql")
+                    if typ.startswith("mysql"):
+                        host = entry.get("host", "localhost")
+                        port = entry.get("port", 3306)
+                        user = entry.get("user", "root")
+                        pwd = entry.get("pass", "")
+                        db = entry.get("db", "")
+                        url = f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
+                        mapping[name] = url
+            except Exception as e:
+                log.warning(f"DB_CONNECTIONS JSON no parseable: {e}")
+        else:
+            # Formato legacy NAME=URL;NAME2=URL2
+            for pair in db_conns.split(";"):
+                pair = pair.strip()
+                if not pair or "=" not in pair:
+                    continue
+                name, url = pair.split("=", 1)
+                mapping[name.strip()] = url.strip()
+
+    # Agregar SOURCE_URL explícita si no aparece
+    if env_vars.get("SOURCE_URL"):
+        primary_name = env_vars.get("SOURCE_NAME", "primary")
+        mapping.setdefault(primary_name, env_vars["SOURCE_URL"])
+
+    log.info("🔍 Validando conexiones detectadas:")
+    for name, url in mapping.items():
+        try:
+            eng = create_engine(url, pool_pre_ping=True)
+            with eng.connect() as c:
+                c.execute(text("SELECT 1"))
+                # Enumerar una tabla para validar permisos (si existe)
+                try:
+                    res = c.execute(text("SHOW TABLES"))
+                    sample = next(iter(res), ("<sin_tablas>",))
+                    sample_tbl = sample[0]
+                except Exception:
+                    sample_tbl = "<error_listado>"
+            log.info(f"✅ Conexión '{name}' OK (sample tabla: {sample_tbl})")
+            tested.append(name)
+        except Exception as e:
+            log.warning(f"❌ Conexión '{name}' FALLÓ: {e}")
+            failures.append({"name": name, "error": str(e)})
+
+    summary = {
+        "tested": tested,
+        "failures": failures,
+        "total": len(mapping),
+        "ok": len(tested),
+    }
+    log.info(f"📊 Resumen validación conexiones: {summary['ok']}/{summary['total']} OK")
+    if failures:
+        log.warning("Conexiones con error:")
+        for f in failures:
+            log.warning(f"  - {f['name']}: {f['error']}")
+    return summary
 
 
 # ---------------------------------
@@ -1487,16 +1949,26 @@ def parse_args():
     p.add_argument("--final-optimize", action="store_true",
                    help="Si dedup=replacing, forzar OPTIMIZE FINAL al terminar cada tabla")
 
+    # Validaciones / auditoría
+    p.add_argument("--validate-connections", action="store_true",
+                   help="Sólo validar conexiones (SELECT 1, listar 1 tabla) y salir")
+    p.add_argument("--audit-only", action="store_true",
+                   help="Sólo ejecutar auditoría (sin ingesta); requiere origen accesible")
+
     return p.parse_args()
 
 
 
 def main():
-    args = parse_args()
 
-    # 🔹 Resolver la URL del origen desde CLI / SOURCE_URL / DB_CONNECTIONS (legado)
-    source_url = resolve_source_url(args, os.environ)
+    args = parse_args()
+    print("🚀 INICIANDO PIPELINE ETL AUTOMÁTICO...")
+
+    # 🔹 Resolver la URL del origen desde CLI / SOURCE_URL / DB_CONNECTIONS (dinámico .env)
+    env_vars = load_env_file()
+    source_url = resolve_source_url(args, env_vars)
     if not source_url:
+        print("❌ ERROR: Debes especificar --source-url o una conexión válida vía SOURCE_URL o DB_CONNECTIONS (legado).")
         log.error("Debes especificar --source-url o una conexión válida vía SOURCE_URL o DB_CONNECTIONS (legado).")
         log.error("Consulta docs/ERROR_RECOVERY.md para más información.")
         sys.exit(1)
@@ -1506,40 +1978,81 @@ def main():
 
     # Conexiones
     try:
+        print("⏳ Conectando a ClickHouse y MySQL...")
         client = get_clickhouse_client()
         src_engine = get_source_engine(source_url)  # ✅ usar la URL resuelta
         ensure_ch_database(client, args.ch_database)
+        print("✅ Conexiones establecidas.")
     except FatalError as e:
+        print(f"❌ Error fatal inicializando conexiones: {e}")
         log.error(f"Error fatal inicializando conexiones: {e}")
         sys.exit(2)
     except Exception as e:
+        print(f"❌ Error inesperado inicializando conexiones: {e}")
         log.error(f"Error inesperado inicializando conexiones: {e}", exc_info=True)
         sys.exit(3)
+
+    # Solo validar conexiones
+    if args.validate_connections:
+        print("🔍 Ejecutando validación de conexiones...")
+        summary = validate_connections(env_vars)
+        if summary["failures"]:
+            print(f"❌ {len(summary['failures'])} conexión(es) fallidas. Revisa logs.")
+            sys.exit(1)
+        else:
+            print(f"✅ Todas las conexiones ({summary['ok']}) válidas.")
+            sys.exit(0)
+
+    # Solo auditoría
+    if args.audit_only:
+        print("⏳ Ejecutando auditoría (modo audit-only)...")
+        try:
+            run_audit(source_url, args.ch_database)
+            print("✅ Auditoría completada.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"❌ Auditoría falló: {e}")
+            sys.exit(1)
+
 
     # Descubrir tablas
     all_pairs = list_tables(src_engine, args.schemas)  # [(schema, table)]
     include_set = set(args.include) if args.include else None
     exclude_set = set(args.exclude) if args.exclude else set()
 
+
+    # --- Crear dinámicamente las bases de datos necesarias en ClickHouse ---
+    detected_databases = set([args.ch_database] + [schema for (schema, _) in all_pairs])
+    for db_name in detected_databases:
+        ensure_ch_database(client, db_name)
+
+    print("⏳ Iniciando ingesta de datos...")
     total_rows = 0
     failed_tables = []
-    
+
     for (schema, table) in all_pairs:
         full = f"{schema}.{table}"
-        if include_set is not None and full not in include_set:
-            continue
-        if full in exclude_set:
+        
+        # Lógica mejorada de filtrado: admite tanto "schema.table" como solo "table"
+        if include_set is not None:
+            # Verificar si coincide el formato completo O solo el nombre de la tabla
+            if full not in include_set and table not in include_set:
+                continue
+        
+        # Lógica de exclusión: admite tanto "schema.table" como solo "table"
+        if full in exclude_set or table in exclude_set:
             continue
 
         ch_table = f"{args.ch_prefix.format(source=args.source_name)}{schema}__{table}".replace(".", "__")
 
         try:
+            print(f"🔄 Ingestando tabla: {full} → ClickHouse:{schema}.{ch_table}")
             rows = ingest_one_table(
                 client=client,
                 src_engine=src_engine,
                 schema=schema,
                 table=table,
-                ch_database=args.ch_database,
+                ch_database=schema,  # Usar el esquema como base destino
                 ch_table=ch_table,
                 chunksize=args.chunksize,
                 limit=(args.limit if args.limit > 0 else None),
@@ -1549,21 +2062,37 @@ def main():
                 version_col=version_col,
                 final_optimize=args.final_optimize,
             )
+            print(f"✅ Tabla {full} procesada: {rows} filas insertadas.")
             total_rows += rows
         except RecoverableError as e:
-            # Error recuperable - registrar y continuar con siguiente tabla
+            print(f"⚠️  Error recuperable en tabla {full}: {e}")
             log.warning(f"Error recuperable en tabla {full}: {e}")
             failed_tables.append({"table": full, "error": str(e), "type": "recoverable"})
         except FatalError as e:
-            # Error fatal - abortar
+            print(f"❌ Error fatal en tabla {full}: {e}")
             log.error(f"Error fatal en tabla {full}: {e}")
             failed_tables.append({"table": full, "error": str(e), "type": "fatal"})
             log.error("Abortando ingesta debido a error fatal.")
             sys.exit(2)
         except Exception as e:
-            # Error inesperado - registrar y continuar
+            print(f"❌ Error inesperado en tabla {full}: {e}")
             log.error(f"Error inesperado en tabla {full}: {e}", exc_info=True)
             failed_tables.append({"table": full, "error": str(e), "type": "unexpected"})
+
+    print(f"== INGESTA TERMINADA == Filas insertadas totales: {total_rows}")
+    if failed_tables:
+        print(f"⚠️  {len(failed_tables)} tabla(s) con errores. Consulta logs para detalles.")
+
+    # Ejecutar auditoría automática al final
+    try:
+        print("⏳ Ejecutando auditoría MySQL → ClickHouse...")
+        run_audit(source_url, args.ch_database)
+        print("✅ Auditoría completada.")
+    except Exception as e:
+        print(f"⚠️  Error en auditoría: {e}")
+        log.warning(f"Error en auditoría: {e}")
+
+    print("🎉 Pipeline ETL finalizado. Ya puedes consultar los datos en Superset con el usuario 'admin' o el usuario configurado.")
 
     log.info(f"== INGESTA TERMINADA == Filas insertadas totales: {total_rows}")
     
@@ -1600,8 +2129,13 @@ def main():
             log.warning(f"  - {ft['table']} ({ft['type']}): {ft['error']}")
         log.warning("Consulta docs/ERROR_RECOVERY.md para soluciones.")
         sys.exit(1)
+    elif len(all_pairs) == 0:
+        log.warning("⚠️ No se encontraron tablas para procesar con los esquemas/filtros especificados")
+        sys.exit(0)
     else:
-        log.info("✓ Todas las tablas se ingirieron exitosamente")
+        successful_count = len(all_pairs) - len(failed_tables)
+        log.info(f"✅ Ingesta completada exitosamente: {successful_count}/{len(all_pairs)} tablas procesadas")
+        log.info(f"📊 Total de registros insertados: {total_rows:,}")
         sys.exit(0)
 
 

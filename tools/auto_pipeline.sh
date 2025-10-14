@@ -3,6 +3,7 @@
 # Se ejecuta automáticamente al iniciar los contenedores
 
 set -e
+set -o pipefail
 
 # Configuración de logs detallados
 LOG_FILE="/app/logs/auto_pipeline_detailed.log"
@@ -16,14 +17,14 @@ log_message() {
     echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
 }
 
-# Función para ejecutar comandos con logs
+# Función para ejecutar comandos con logs (salida visible y persistente)
 execute_with_log() {
     local description=$1
     local command=$2
     
-    log_message "INFO" "� INICIANDO: $description"
+    log_message "INFO" "🚧 INICIANDO: $description"
     
-    if eval "$command" >> "$LOG_FILE" 2>&1; then
+    if eval "$command" 2>&1 | tee -a "$LOG_FILE"; then
         log_message "SUCCESS" "✅ COMPLETADO: $description"
         return 0
     else
@@ -32,7 +33,7 @@ execute_with_log() {
     fi
 }
 
-echo "�🚀 INICIANDO PIPELINE ETL AUTOMÁTICO..."
+echo "🚀 INICIANDO PIPELINE ETL AUTOMÁTICO..."
 echo "⏰ $(date)"
 log_message "INFO" "🚀 INICIANDO PIPELINE ETL AUTOMÁTICO - $(date)"
 

@@ -99,6 +99,25 @@ URL del servicio Kafka Connect.
 export CONNECT_URL=http://localhost:8083
 ```
 
+### Variables Debezium (ajustes soportados)
+Parámetros de ajuste del conector Debezium. Estas variables controlan el comportamiento del conector, pero no las credenciales.
+
+Soportadas:
+- DBZ_SERVER_NAME_PREFIX (default: dbserver)
+- DBZ_SNAPSHOT_MODE (default: initial)
+- DBZ_DECIMAL_MODE (default: string)
+- DBZ_BINARY_MODE (default: base64)
+- DBZ_TIME_PRECISION (default: connect)
+- DBZ_HISTORY_TOPIC (default: schema-changes)
+
+No usar (deprecadas, serán ignoradas):
+- DBZ_DATABASE_HOSTNAME
+- DBZ_DATABASE_PORT
+- DBZ_DATABASE_USER
+- DBZ_DATABASE_PASSWORD
+
+Motivo: Las credenciales/host/puerto de MySQL provienen exclusivamente de DB_CONNECTIONS (fuente de verdad única). Mantener variables duplicadas ocasiona inconsistencias.
+
 ### SUPERSET_URL
 URL del servicio Superset.
 
