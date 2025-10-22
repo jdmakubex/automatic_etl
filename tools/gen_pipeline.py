@@ -28,9 +28,17 @@ def env_json(name, default=None):
 
 def get_conns():
     c = env_json("DB_CONNECTIONS")
-    if c:
-        return c
-    raise SystemExit("Define DB_CONNECTIONS en .env")
+    if not c:
+        raise SystemExit("Define DB_CONNECTIONS en .env")
+    # Normalizar a lista
+    if isinstance(c, dict):
+        c = [c]
+    # Seguridad: excluir schemas de sistema salvo permiso explícito
+    allow_system = (os.getenv("ALLOW_SYSTEM_SCHEMAS", "false").lower() in {"1","true","yes","on"})
+    system_schemas = {"mysql", "information_schema", "performance_schema", "sys"}
+    if not allow_system:
+        c = [x for x in c if (x or {}).get("db") not in system_schemas]
+    return c
 
 def fetch_tables(conn):
     cx = pymysql.connect(host=conn["host"], port=int(conn["port"]), user=conn["user"],

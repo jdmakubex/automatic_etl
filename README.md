@@ -46,6 +46,17 @@ Pipeline ETL completamente automatizado con soporte para múltiples bases de dat
 
 ### Pipeline Automático
 
+**Ejecución completa con limpieza (RECOMENDADO):**
+```bash
+# Limpieza completa del sistema
+bash tools/clean_all.sh
+
+# Reiniciar servicios con profile CDC
+docker compose --profile cdc up -d
+
+# El pipeline se ejecutará automáticamente y configurará todo
+```
+
 **Inicio normal:**
 ```bash
 ./start_etl_pipeline.sh

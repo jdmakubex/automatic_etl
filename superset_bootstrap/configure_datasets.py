@@ -293,13 +293,89 @@ def update_dataset_time_column(url, token_ref, username, password, dataset_id, t
         print(f"⚠️  No se pudo configurar columna de tiempo ({resp.status_code}): {resp.text}")
         return False
 
+def parse_schemas_from_env() -> list:
+    """Descubre esquemas de ClickHouse a mapear como datasets en Superset.
+    Prioriza SUPERSET_SCHEMAS (coma-separado). Si no está definido, deriva de DB_CONNECTIONS
+    excluyendo schemas de sistema (information_schema, mysql, performance_schema, sys) y variantes
+    técnicas (_analytics, ext).
+    Fallback: ['fgeo_analytics']
+    """
+    # 1) SUPERSET_SCHEMAS explicit (comma-separated)
+    raw = os.getenv("SUPERSET_SCHEMAS", "").strip()
+    if raw:
+        items = [s.strip() for s in raw.split(",") if s.strip()]
+        if items:
+            return sorted(set(items))
+
+    # 2) Derive from DB_CONNECTIONS JSON, filtering out system and technical schemas
+    system_schemas = {"information_schema", "mysql", "performance_schema", "sys"}
+    excluded_patterns = ["_analytics", "ext", "default", "system", "INFORMATION_SCHEMA"]
+    
+    try:
+        db_conns = os.getenv("DB_CONNECTIONS", "").strip()
+        schemas = []
+        if db_conns.startswith("[") and "]" in db_conns:
+            import json as _json
+            conns = _json.loads(db_conns)
+            if isinstance(conns, dict):
+                conns = [conns]
+            for c in conns or []:
+                dbn = (c or {}).get("db")
+                if dbn and dbn not in system_schemas:
+                    # Excluir variantes técnicas
+                    if not any(pattern in dbn for pattern in excluded_patterns):
+                        schemas.append(dbn)
+        # Fallback default
+        schemas = [s for s in schemas if s]
+        if schemas:
+            return sorted(set(schemas))
+    except Exception:
+        pass
+
+    # 3) Default fallback
+    return [os.getenv("SUPERSET_SCHEMA", "fgeo_analytics")]
+
+def cleanup_duplicate_databases(url, token_ref, username, password):
+    """Elimina bases de datos ClickHouse duplicadas o legacy, dejando solo 'ClickHouse ETL Database'"""
+    print("🧹 Limpiando bases de datos ClickHouse duplicadas...")
+    
+    headers = {"Content-Type": "application/json"}
+    
+    try:
+        response = authed_request(url, "GET", "/api/v1/database/", token_ref, username, password, headers=headers)
+        if response.status_code == 200:
+            databases = response.json().get("result", [])
+            official_db_name = "ClickHouse ETL Database"
+            official_db_id = None
+            
+            for db in databases:
+                db_name = db.get('database_name', '')
+                db_id = db.get('id')
+                
+                if db_name == official_db_name:
+                    official_db_id = db_id
+                    print(f"✅ BD oficial encontrada: {db_name} (ID {db_id})")
+                elif 'clickhouse' in db_name.lower():
+                    print(f"🗑️  Eliminando BD duplicada: {db_name} (ID {db_id})")
+                    del_resp = authed_request(url, "DELETE", f"/api/v1/database/{db_id}", token_ref, username, password, headers=headers)
+                    if del_resp.ok:
+                        print(f"✅ BD eliminada: {db_name}")
+                    else:
+                        print(f"⚠️  No se pudo eliminar {db_name}: {del_resp.status_code}")
+            
+            return official_db_id
+        return None
+    except Exception as e:
+        print(f"❌ Error limpiando bases de datos duplicadas: {e}")
+        return None
+
 def main():
     # Configuración
     SUPERSET_URL = os.getenv("SUPERSET_URL", "http://localhost:8088")
     SUPERSET_ADMIN = os.getenv("SUPERSET_ADMIN", "admin")
     SUPERSET_PASSWORD = os.getenv("SUPERSET_PASSWORD", "Admin123!")
-    # Usar el esquema analítico por defecto
-    SCHEMA_NAME = os.getenv("SUPERSET_SCHEMA", "fgeo_analytics")
+    # Esquemas a procesar (dinámico)
+    SCHEMAS = parse_schemas_from_env()
     # No forzar columna temporal por defecto a menos que se indique explícitamente
     TIME_COLUMN = os.getenv("SUPERSET_TIME_COLUMN", "")
     
@@ -323,7 +399,10 @@ def main():
         sys.exit(1)
     token_ref = {"token": token, "password": SUPERSET_PASSWORD}
     
-    # Obtener bases de datos
+    # Limpiar bases de datos duplicadas y obtener la oficial
+    official_db_id = cleanup_duplicate_databases(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD)
+    
+    # Obtener bases de datos (después de limpieza)
     databases = get_databases(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD)
     
     clickhouse_db = None
@@ -342,14 +421,18 @@ def main():
     sync_database_schemas(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'])
     time.sleep(2)  # Esperar un poco
     
-    # Obtener tablas y crear datasets
-    tables = get_database_tables(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'], SCHEMA_NAME)
-    
-    if tables:
+    # Obtener tablas por esquema y crear datasets
+    total_tables = 0
+    created_count = 0
+    time_col_set = 0
+    candidates_report = []
+    for SCHEMA_NAME in SCHEMAS:
+        tables = get_database_tables(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'], SCHEMA_NAME)
+        if not tables:
+            print(f"ℹ️  No hay tablas visibles en esquema '{SCHEMA_NAME}' (puede ser normal si aún no ingesta)")
+            continue
         print(f"🔨 Creando datasets para {len(tables)} tablas en esquema '{SCHEMA_NAME}'...")
-        created_count = 0
-        time_col_set = 0
-        candidates_report = []
+        total_tables += len(tables)
         for table in tables:
             table_name = table.get('value', table) if isinstance(table, dict) else table
             # Try to create dataset; if it already exists, find its ID and continue
@@ -363,11 +446,6 @@ def main():
                 found = find_dataset(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'], table_name, SCHEMA_NAME)
                 ds_id = found
                 # Determine a safe time column to set as main_dttm_col.
-                # Behavior:
-                # - If SUPERSET_TIME_COLUMN env var is provided (non-empty), use it.
-                # - Else, attempt to detect datetime-like columns from dataset metadata
-                #   and only set main_dttm_col when exactly one clear candidate exists.
-                # ds_id already computed above
                 set_time_col = False
                 chosen_time_col = None
                 if ds_id:
@@ -391,26 +469,27 @@ def main():
                                     if any(k in ln for k in ['date', 'fecha', 'time', 'timestamp']) or ln.endswith('_at'):
                                         candidates.append(col_name)
                                 # Save candidates to report (even if 0 or >1)
-                                candidates_report.append({"table": table_name, "candidates": candidates})
+                                candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": candidates})
                                 # If exactly one candidate, choose it; otherwise skip to avoid wrong auto-setting
                                 if len(candidates) == 1:
                                     chosen_time_col = candidates[0]
                                     set_time_col = True
                                 else:
-                                    print(f"ℹ️  No se establecerá columna temporal automática para {table_name}: candidatos={candidates}")
+                                    print(f"ℹ️  No se establecerá columna temporal automática para {SCHEMA_NAME}.{table_name}: candidatos={candidates}")
                             else:
                                 print(f"⚠️  No se pudo leer metadata del dataset {ds_id}: {resp.status_code}")
-                                candidates_report.append({"table": table_name, "candidates": [], "error": f"metadata_status_{resp.status_code}"})
+                                candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": [], "error": f"metadata_status_{resp.status_code}"})
                         except requests.exceptions.RequestException as e:
                             print(f"⚠️  Error buscando columnas del dataset {ds_id}: {e}")
-                            candidates_report.append({"table": table_name, "candidates": [], "error": str(e)})
+                            candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": [], "error": str(e)})
 
                 if set_time_col and ds_id and chosen_time_col:
                     if update_dataset_time_column(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id, chosen_time_col):
                         time_col_set += 1
                 time.sleep(1)  # Pequeña pausa entre creaciones
-        
-        print(f"✅ Se crearon {created_count} datasets de {len(tables)} tablas")
+
+    if total_tables:
+        print(f"✅ Datasets verificados/creados para {total_tables} tablas en {len(SCHEMAS)} esquema(s)")
         if TIME_COLUMN:
             print(f"⏱️  Columna temporal '{TIME_COLUMN}' establecida en {time_col_set} datasets")
         # Persist candidates report to a sensible path: prefer /app/logs if available, else /tmp
@@ -443,7 +522,8 @@ def main():
                 mapping = {}
                 for item in candidates_report:
                     tname = item['table']
-                    q = f"(filters:!((col:table_name,opr:eq,value:'{tname}'),(col:database_id,opr:eq,value:{clickhouse_db['id']}),(col:schema,opr:eq,value:'{SCHEMA_NAME}')),columns:!(id),page:0,page_size:1)"
+                    schema_for_t = item.get('schema') or os.getenv("SUPERSET_SCHEMA", "fgeo_analytics")
+                    q = f"(filters:!((col:table_name,opr:eq,value:'{tname}'),(col:database_id,opr:eq,value:{clickhouse_db['id']}),(col:schema,opr:eq,value:'{schema_for_t}')),columns:!(id),page:0,page_size:1)"
                     resp = authed_request(SUPERSET_URL, "GET", f"/api/v1/dataset/?q={q}", token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, headers={"Content-Type": "application/json"})
                     res = resp.json().get('result') or []
                     if res:
@@ -451,7 +531,7 @@ def main():
                         r2 = authed_request(SUPERSET_URL, "GET", f"/api/v1/dataset/{did}", token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, headers={"Content-Type": "application/json"})
                         if r2.status_code==200:
                             main = r2.json().get('result',{}).get('main_dttm_col')
-                            mapping[tname] = main
+                            mapping[f"{schema_for_t}.{tname}"] = main
                 with open(mapping_path,'w') as mf:
                     json.dump(mapping, mf, indent=2, ensure_ascii=False)
                 print(f"📝 Time column mapping written to {mapping_path}")
@@ -460,9 +540,10 @@ def main():
         # Print short summary
         print("📋 Resumen de candidatos detectados:")
         for item in candidates_report:
-            print(f" - {item['table']}: {item.get('candidates')}")
+            prefix = f"{item.get('schema')}." if item.get('schema') else ""
+            print(f" - {prefix}{item['table']}: {item.get('candidates')}")
     else:
-        print("⚠️  No se encontraron tablas para crear datasets")
+        print("⚠️  No se encontraron tablas para crear datasets en los esquemas configurados")
     
     print("🎉 Configuración de datasets completada!")
     print("📋 Ve a Superset > Data > Datasets para ver las tablas disponibles")

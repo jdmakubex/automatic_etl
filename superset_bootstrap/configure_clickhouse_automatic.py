@@ -173,8 +173,8 @@ def get_api_token(session):
         logger.error(f"Error obteniendo API token: {e}")
         return None
 
-def check_existing_database(session, token):
-    """Verifica si la base de datos ClickHouse ya existe"""
+def cleanup_duplicate_databases(session, token):
+    """Elimina bases de datos ClickHouse duplicadas o legacy, dejando solo la oficial"""
     try:
         headers = {
             'X-CSRFToken': token,
@@ -184,13 +184,30 @@ def check_existing_database(session, token):
         response = session.get(f"{SUPERSET_URL}/api/v1/database/", headers=headers)
         if response.status_code == 200:
             databases = response.json().get('result', [])
+            official_db_name = "ClickHouse ETL Database"
+            official_db_id = None
+            
+            # Identificar la BD oficial y eliminar todas las demás que contengan 'clickhouse'
             for db in databases:
-                if 'clickhouse' in db.get('database_name', '').lower():
-                    logger.info(f"Base de datos ClickHouse ya existe: {db['database_name']}")
-                    return True
+                db_name = db.get('database_name', '')
+                db_id = db.get('id')
+                
+                if db_name == official_db_name:
+                    official_db_id = db_id
+                    logger.info(f"BD oficial encontrada: {db_name} (ID {db_id})")
+                elif 'clickhouse' in db_name.lower():
+                    # Eliminar BD duplicada/legacy
+                    logger.info(f"Eliminando BD duplicada: {db_name} (ID {db_id})")
+                    del_resp = session.delete(f"{SUPERSET_URL}/api/v1/database/{db_id}", headers=headers)
+                    if del_resp.ok:
+                        logger.info(f"✅ BD eliminada: {db_name}")
+                    else:
+                        logger.warning(f"⚠️  No se pudo eliminar {db_name}: {del_resp.status_code}")
+            
+            return official_db_id is not None
         return False
     except Exception as e:
-        logger.error(f"Error verificando bases de datos existentes: {e}")
+        logger.error(f"Error limpiando bases de datos duplicadas: {e}")
         return False
 
 def create_clickhouse_database(session, token):
@@ -313,10 +330,10 @@ def main():
         sys.exit(1)
     logger.info("✅ Token de API obtenido")
     
-    # Verificar si la base de datos ya existe
-    logger.info("🔍 Verificando si ClickHouse ya está configurado...")
-    if check_existing_database(session, api_token):
-        logger.info("✅ Base de datos ClickHouse ya está configurada")
+    # Limpiar bases de datos duplicadas y verificar si existe la oficial
+    logger.info("🧹 Limpiando bases de datos ClickHouse duplicadas...")
+    if cleanup_duplicate_databases(session, api_token):
+        logger.info("✅ Base de datos ClickHouse ya está configurada (limpieza aplicada)")
         return
     
     # Probar conexión antes de crear

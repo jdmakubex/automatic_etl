@@ -527,3 +527,39 @@ services:
     command: ["python", "tools/apply_connectors_auto.py"]
     profiles:
       - manual  # Solo se ejecuta si se especifica el perfil manual
+
+  # ---------- CDC MONITOR (monitoreo continuo en background) ----------
+  cdc-monitor:
+    image: alpine:latest
+    container_name: cdc-monitor
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      - CONNECT_URL=http://connect:8083
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CH_USER=etl
+      - CH_PASSWORD=Et1Ingest!
+      - REPORT_PATH=/app/logs/cdc_extended_report.json
+      - CDC_MONITOR_INTERVAL=300  # 5 minutos
+    networks:
+      - etl_net
+    volumes:
+      - ./tools:/app/tools:ro
+      - ./logs:/app/logs
+    depends_on:
+      connect:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      cdc-bootstrap:
+        condition: service_completed_successfully
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        apk add --no-cache bash curl jq
+        bash /app/tools/cdc_monitor.sh
+    restart: unless-stopped
+    profiles:
+      - cdc  # Solo se ejecuta con el perfil cdc

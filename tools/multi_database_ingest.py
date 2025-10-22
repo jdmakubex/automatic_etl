@@ -63,6 +63,9 @@ class MultiDatabaseIngest:
         self.db_connections_json = os.getenv("DB_CONNECTIONS", "[]")
         self.results = {}
         self.start_time = datetime.now()
+        # Seguridad: excluir schemas de sistema salvo que se permita explícitamente
+        self.system_schemas = {"mysql", "information_schema", "performance_schema", "sys"}
+        self.allow_system = os.getenv("ALLOW_SYSTEM_SCHEMAS", "false").lower() in {"1","true","yes","on"}
         
         logger.info("🏭 Iniciando Multi-Database Ingest Orchestrator")
         
@@ -72,8 +75,12 @@ class MultiDatabaseIngest:
             connections = json.loads(self.db_connections_json)
             if isinstance(connections, dict):
                 connections = [connections]
-            
-            logger.info(f"📊 Encontradas {len(connections)} conexiones de base de datos")
+            # Filtrar conexiones a schemas de sistema salvo permiso explícito
+            original_count = len(connections)
+            if not self.allow_system:
+                connections = [c for c in connections if (c or {}).get('db') not in self.system_schemas]
+
+            logger.info(f"📊 Conexiones detectadas: {original_count} (filtradas: {original_count - len(connections)})")
             for i, conn in enumerate(connections):
                 db_name = conn.get('db', 'unknown')
                 conn_name = conn.get('name', f'conn_{i}')
@@ -126,12 +133,15 @@ class MultiDatabaseIngest:
                 '--source-url', source_url,
                 '--source-name', conn_name,
                 '--ch-database', f"{db_name}_analytics",
-                '--ch-prefix', f"{db_name}_",
                 '--schemas', db_name,
                 '--chunksize', '50000',
                 '--truncate-before-load',
                 '--dedup', 'none'
             ]
+            # Si el entorno define un prefijo ClickHouse, pásalo; de lo contrario usa el default del runner (src__{source}__)
+            ch_prefix_env = os.getenv('CH_PREFIX')
+            if ch_prefix_env:
+                ingest_cmd.extend(['--ch-prefix', ch_prefix_env])
             
             ingest_result = subprocess.run(
                 ingest_cmd, 
@@ -142,17 +152,18 @@ class MultiDatabaseIngest:
             
             if ingest_result.returncode == 0:
                 result['steps']['ingestion'] = 'SUCCESS'
-                # Extraer número de registros del output
-                output_lines = ingest_result.stdout.split('\n')
-                for line in output_lines:
-                    if 'registros totales' in line.lower():
-                        try:
-                            import re
-                            numbers = re.findall(r'\d+', line)
-                            if numbers:
-                                result['total_records'] = int(numbers[-1])
-                        except:
-                            pass
+                # Extraer número de registros del output (patrones en ES):
+                #  - "Filas insertadas totales: N"
+                #  - "registros totales: N"
+                try:
+                    import re
+                    m = re.search(r"Filas\s+insertadas\s+totales:\s*(\d+)", ingest_result.stdout, re.IGNORECASE)
+                    if not m:
+                        m = re.search(r"registros\s+totales\s*:\s*(\d+)", ingest_result.stdout, re.IGNORECASE)
+                    if m:
+                        result['total_records'] = int(m.group(1))
+                except Exception:
+                    pass
                 logger.info(f"✅ Ingesta completada para {db_name}: {result['total_records']} registros")
             else:
                 result['steps']['ingestion'] = 'FAILED'
@@ -193,44 +204,48 @@ class MultiDatabaseIngest:
                 
                 if retry_result.returncode == 0:
                     result['steps']['ingestion'] = 'SUCCESS_ON_RETRY'
-                    # Actualizar número de registros
-                    output_lines = retry_result.stdout.split('\n')
-                    for line in output_lines:
-                        if 'registros totales' in line.lower():
-                            try:
-                                import re
-                                numbers = re.findall(r'\d+', line)
-                                if numbers:
-                                    result['total_records'] = int(numbers[-1])
-                            except:
-                                pass
+                    # Actualizar número de registros (mismos patrones)
+                    try:
+                        import re
+                        m = re.search(r"Filas\s+insertadas\s+totales:\s*(\d+)", retry_result.stdout, re.IGNORECASE)
+                        if not m:
+                            m = re.search(r"registros\s+totales\s*:\s*(\d+)", retry_result.stdout, re.IGNORECASE)
+                        if m:
+                            result['total_records'] = int(m.group(1))
+                    except Exception:
+                        pass
                     logger.info(f"✅ Reintento exitoso para {db_name}: {result['total_records']} registros")
                 else:
                     logger.warning(f"⚠️ Reintento falló para {db_name}: {retry_result.stderr}")
             
-            # Paso 2: Ejecutar auditoría
+            # Paso 2: Ejecutar auditoría usando el runner (lógica que conoce el patrón de nombres)
             if result['steps'].get('ingestion') in ['SUCCESS', 'SUCCESS_ON_RETRY']:
-                logger.info(f"🔍 Ejecutando auditoría para {db_name}...")
+                logger.info(f"🔍 Ejecutando auditoría para {db_name} (runner audit-only)...")
                 audit_cmd = [
-                    'python', '/app/tools/audit_mysql_clickhouse.py',
-                    source_url,
-                    f"{db_name}_analytics"
+                    'python', '/app/tools/ingest_runner.py',
+                    '--source-url', source_url,
+                    '--source-name', conn_name,
+                    '--ch-database', f"{db_name}_analytics",
+                    '--audit-only'
                 ]
-                
-                audit_result = subprocess.run(
-                    audit_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=600  # 10 minutos
-                )
-                
-                if audit_result.returncode == 0:
-                    result['steps']['audit'] = 'SUCCESS'
-                    logger.info(f"✅ Auditoría completada para {db_name}")
-                else:
-                    result['steps']['audit'] = 'FAILED'
-                    result['errors'].append(f"Auditoría falló: {audit_result.stderr}")
-                    logger.warning(f"⚠️ Auditoría falló para {db_name}: {audit_result.stderr}")
+                try:
+                    audit_result = subprocess.run(
+                        audit_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=600  # 10 minutos
+                    )
+                    if audit_result.returncode == 0:
+                        result['steps']['audit'] = 'SUCCESS'
+                        logger.info(f"✅ Auditoría completada para {db_name}")
+                    else:
+                        result['steps']['audit'] = 'FAILED'
+                        result['errors'].append(f"Auditoría falló: {audit_result.stderr}")
+                        logger.warning(f"⚠️ Auditoría falló para {db_name}: {audit_result.stderr}")
+                except subprocess.TimeoutExpired:
+                    result['steps']['audit'] = 'TIMEOUT'
+                    result['errors'].append("Auditoría excedió tiempo límite")
+                    logger.warning(f"⏰ Auditoría timeout para {db_name}")
             
             # Determinar status final
             if result['steps'].get('ingestion') in ['SUCCESS', 'SUCCESS_ON_RETRY']:
