@@ -216,21 +216,50 @@ class SupersetAutoConfigurator:
             self.logger.error(f"❌ Error autenticando: {str(e)}")
             return False
     
-    def create_clickhouse_database_connection(self) -> Tuple[bool, Optional[int]]:
-        """Crear conexión a ClickHouse en Superset"""
+    def cleanup_duplicate_databases(self) -> Optional[int]:
+        """Eliminar BDs ClickHouse duplicadas/legadas dejando solo la oficial.
+        Retorna el ID de la BD oficial si existe.
+        """
         try:
-            self.logger.info("🏠 Configurando conexión ClickHouse...")
-            
-            # Verificar si ya existe
-            db_name = f"ClickHouse_ETL_{self.clickhouse_config['database']}"
-            
-            # Buscar base de datos existente
+            self.logger.info("🧹 Limpiando bases de datos ClickHouse duplicadas...")
+            resp = self.session.get(f"{self.superset_url}/api/v1/database/")
+            resp.raise_for_status()
+
+            official_name = "ClickHouse ETL Database"
+            official_id = None
+            for db in resp.json().get("result", []):
+                name = db.get("database_name", "")
+                dbid = db.get("id")
+                if name == official_name:
+                    official_id = dbid
+                    self.logger.info(f"✅ BD oficial encontrada: {name} (ID {dbid})")
+                elif "clickhouse" in name.lower():
+                    self.logger.info(f"🗑️  Eliminando BD duplicada: {name} (ID {dbid})")
+                    del_resp = self.session.delete(f"{self.superset_url}/api/v1/database/{dbid}")
+                    if del_resp.ok:
+                        self.logger.info(f"✅ BD eliminada: {name}")
+                    else:
+                        self.logger.warning(f"⚠️  No se pudo eliminar {name}: {del_resp.status_code}")
+            return official_id
+        except Exception as e:
+            self.logger.error(f"❌ Error limpiando BDs duplicadas: {e}")
+            return None
+
+    def create_clickhouse_database_connection(self) -> Tuple[bool, Optional[int]]:
+        """Crear/asegurar conexión única a ClickHouse en Superset"""
+        try:
+            self.logger.info("🏠 Configurando conexión ClickHouse (única y oficial)...")
+            # Nombre oficial único
+            db_name = "ClickHouse ETL Database"
+
+            # Buscar base de datos existente y limpiar duplicadas primero
+            self.cleanup_duplicate_databases()
+
             response = self.session.get(f"{self.superset_url}/api/v1/database/")
             response.raise_for_status()
-            
             databases = response.json().get("result", [])
             existing_db = next((db for db in databases if db.get("database_name") == db_name), None)
-            
+
             # Construir URI de conexión
             ch_uri = (f"clickhousedb+connect://{self.clickhouse_config['user']}:"
                      f"{self.clickhouse_config['password']}@{self.clickhouse_config['host']}:"
@@ -451,7 +480,7 @@ class SupersetAutoConfigurator:
                 return False, results
             results['authentication'] = True
             
-            # 5. Crear conexión ClickHouse
+            # 5. Crear conexión ClickHouse (única, con limpieza previa)
             ch_success, db_id = self.create_clickhouse_database_connection()
             results['clickhouse_connection'] = ch_success
             results['database_id'] = db_id
@@ -460,14 +489,8 @@ class SupersetAutoConfigurator:
                 results['issues'].append("Falló conexión ClickHouse")
                 return False, results
             
-            # 6. Crear datasets
-            datasets_success, datasets = self.discover_and_create_datasets(db_id)
-            results['datasets_created'] = datasets
-            
-            # 7. Crear dashboard de muestra
-            if datasets:
-                dashboard_success = self.create_sample_dashboard(datasets)
-                results['dashboard_created'] = dashboard_success
+            # 6. (Opcional) Crear datasets y dashboard se delega a 'superset-datasets'
+            self.logger.info("ℹ️  Creación de datasets se delega al servicio superset-datasets (idempotente)")
             
         except Exception as e:
             error_msg = f"Error crítico en configuración: {str(e)}"
