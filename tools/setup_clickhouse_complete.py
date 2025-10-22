@@ -123,21 +123,17 @@ def create_users():
     logger.info("Configurando usuarios y permisos...")
     t0 = time.time()
     
+    # Importante: en este entorno los usuarios están definidos vía XML (almacenamiento readonly).
+    # Por ello, evitar intentos de crear usuarios adicionales (superset_ro, superset_conn) que fallan.
     users = [
         {
-            'name': 'etl',
+            'name': os.getenv('CLICKHOUSE_ETL_USER', 'etl'),
             'password': os.getenv('CLICKHOUSE_ETL_PASSWORD', 'Et1Ingest!'),
             'grants': ['ALL']
         },
         {
-            'name': 'superset', 
+            'name': os.getenv('CLICKHOUSE_USER', 'superset'), 
             'password': os.getenv('CLICKHOUSE_PASSWORD', 'Sup3rS3cret!'),
-            'grants': ['SELECT']
-        },
-        {
-            # Usuario de solo lectura para Superset apuntando SOLO a esquemas analytics
-            'name': os.getenv('CLICKHOUSE_SUPERSET_USER', 'superset_ro'),
-            'password': os.getenv('CLICKHOUSE_SUPERSET_PASSWORD', 'Sup3rS3cret!'),
             'grants': ['SELECT']
         }
     ]
@@ -151,16 +147,10 @@ def create_users():
         else:
             logger.warning(f"Usuario '{user['name']}': {result}")
         
-        # Otorgar permisos
-        # Otorgar permisos
-        # - etl: ALL sobre la BD principal del entorno (CLICKHOUSE_DATABASE)
-        # - superset: SELECT sobre la BD principal (compatibilidad)
-        # - superset_ro: SELECT SOLO sobre esquemas analytics configurados (por defecto fiscalizacion_analytics)
+        # Otorgar permisos base mínimos por usuario
         db_name = os.getenv("CLICKHOUSE_DATABASE", "fgeo_analytics")
-        analytics_dbs = os.getenv("ANALYTICS_DATABASES", "fiscalizacion_analytics").split(",")
-        analytics_dbs = [d.strip() for d in analytics_dbs if d.strip()]
 
-        if user['name'] == 'etl':
+        if user['name'] == os.getenv('CLICKHOUSE_ETL_USER', 'etl'):
             for grant in user['grants']:
                 query = f"GRANT {grant} ON {db_name}.* TO {user['name']}"
                 success, result = execute_clickhouse_query(query)
@@ -168,7 +158,7 @@ def create_users():
                     logger.info(f"Permiso '{grant}' otorgado a '{user['name']}' en {db_name}.*")
                 else:
                     logger.warning(f"Permiso '{grant}' para '{user['name']}' en {db_name}.*: {result}")
-        elif user['name'] == 'superset':
+        elif user['name'] == os.getenv('CLICKHOUSE_USER', 'superset'):
             for grant in user['grants']:
                 query = f"GRANT {grant} ON {db_name}.* TO {user['name']}"
                 success, result = execute_clickhouse_query(query)
@@ -177,16 +167,69 @@ def create_users():
                 else:
                     logger.warning(f"Permiso '{grant}' para '{user['name']}' en {db_name}.*: {result}")
         else:
-            # superset_ro u otro usuario de solo lectura: limitar a analytics
-            for adb in analytics_dbs:
-                query = f"GRANT SELECT ON {adb}.* TO {user['name']}"
-                success, result = execute_clickhouse_query(query)
-                if success:
-                    logger.info(f"SELECT otorgado a '{user['name']}' en {adb}.*")
-                else:
-                    logger.warning(f"SELECT para '{user['name']}' en {adb}.*: {result}")
+            # No crear usuarios adicionales; los permisos estrictos se aplicarán más abajo al usuario objetivo
+            logger.info("Posponiendo permisos específicos para asignarlos dinámicamente por DB_CONNECTIONS...")
     logger.info(f"Usuarios y permisos listos en {time.time()-t0:.2f}s")
     return True
+
+def parse_allowed_schemas_from_env() -> list:
+    """Devuelve la lista de bases de datos (schemas) permitidas para Superset, derivada de DB_CONNECTIONS.
+    Excluye schemas de sistema y patrones técnicos (_analytics, ext, default, system, INFORMATION_SCHEMA).
+    """
+    system_schemas = {"information_schema", "mysql", "performance_schema", "sys"}
+    excluded_patterns = ["_analytics", "ext", "default", "system", "INFORMATION_SCHEMA"]
+    try:
+        raw = os.getenv("DB_CONNECTIONS", "").strip()
+        if raw.startswith("[") and "]" in raw:
+            conns = json.loads(raw)
+            if isinstance(conns, dict):
+                conns = [conns]
+            schemas = []
+            for c in conns or []:
+                dbn = (c or {}).get("db")
+                if dbn and dbn not in system_schemas and not any(p in dbn for p in excluded_patterns):
+                    schemas.append(dbn)
+            return sorted(set(schemas))
+    except Exception as e:
+        logger.warning(f"No se pudo parsear DB_CONNECTIONS: {e}")
+    # Fallback: al menos la base principal
+    return [os.getenv("CLICKHOUSE_DATABASE", "fgeo_analytics")]
+
+def enforce_superset_strict_permissions() -> bool:
+    """Restringe el usuario de conexión de Superset (SQL-managed) a solo las bases declaradas en DB_CONNECTIONS.
+    Aplica REVOKE/GRANT directos sobre el usuario gestionado por SQL (evita users_xml readonly).
+    También otorga permisos CREATE TEMPORARY TABLE para que Superset pueda crear gráficas avanzadas.
+    """
+    try:
+        # Usar el usuario existente (definido en XML) para la conexión de Superset
+        superset_user = os.getenv('CLICKHOUSE_USER', 'superset')
+        allowed = parse_allowed_schemas_from_env()
+        logger.info(f"Aplicando permisos estrictos para {superset_user}. Esquemas permitidos: {allowed}")
+        # No intentar crear usuario (XML storage es readonly)
+        # Limpiar permisos previos y otorgar solo los necesarios
+        execute_clickhouse_query(f"REVOKE ALL ON *.* FROM {superset_user}")
+        
+        # Otorgar SELECT en cada schema permitido
+        for db in allowed:
+            ok, out = execute_clickhouse_query(f"GRANT SELECT ON {db}.* TO {superset_user}")
+            if ok:
+                logger.info(f"GRANT SELECT ON {db}.* TO {superset_user}")
+            else:
+                logger.warning(f"Fallo GRANT en {db}.*: {out}")
+        
+        # Otorgar CREATE TEMPORARY TABLE para que Superset pueda crear charts/dashboards
+        # Esto permite a Superset crear tablas temporales necesarias para ciertos tipos de visualización
+        ok, out = execute_clickhouse_query(f"GRANT CREATE TEMPORARY TABLE ON *.* TO {superset_user}")
+        if ok:
+            logger.info(f"✅ Permiso CREATE TEMPORARY TABLE otorgado a {superset_user}")
+        else:
+            logger.warning(f"⚠️  Fallo otorgando CREATE TEMPORARY TABLE: {out}")
+
+        logger.info(f"Permisos estrictos aplicados a {superset_user}")
+        return True
+    except Exception as e:
+        logger.error(f"Error aplicando permisos estrictos: {e}")
+        return False
 
 def create_initial_tables():
     """Crear tablas iniciales con datos de prueba y medir tiempo"""
@@ -333,6 +376,8 @@ def main():
         if not create_users():
             logger.error("Error configurando usuarios")
             return 1
+        # 3.1. Restringir usuario de Superset a DB_CONNECTIONS
+        enforce_superset_strict_permissions()
         
         # 4. Crear tablas iniciales
         if not create_initial_tables():

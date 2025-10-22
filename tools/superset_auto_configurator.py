@@ -70,12 +70,26 @@ class SupersetAutoConfigurator:
         # IMPORTANTE: Superset siempre se ejecuta en contenedor, por lo que 
         # SIEMPRE debe usar 'clickhouse' como host, independientemente de 
         # desde dónde se ejecute este configurador
+        # Nota clave: En este entorno los usuarios están definidos vía XML (lectura únicamente),
+        # por lo que debemos usar el usuario existente 'superset' (o CLICKHOUSE_USER) y NO crear
+        # usuarios nuevos dinámicamente. Si se desea usar un usuario dedicado distinto, deberá
+        # venir explícito por variables de entorno.
+        user = (
+            os.getenv('CLICKHOUSE_USER')
+            or os.getenv('CLICKHOUSE_SUPERSET_USER')
+            or 'superset'
+        )
+        password = (
+            os.getenv('CLICKHOUSE_PASSWORD')
+            or os.getenv('CLICKHOUSE_SUPERSET_PASSWORD')
+            or 'Sup3rS3cret!'
+        )
         return {
             'host': 'clickhouse',
             'port': int(os.getenv('CLICKHOUSE_PORT', 8123)),
             'database': os.getenv('CLICKHOUSE_DATABASE', 'fgeo_analytics'),
-            'user': os.getenv('CLICKHOUSE_USER', 'superset'),
-            'password': os.getenv('CLICKHOUSE_PASSWORD', 'Sup3rS3cret!')
+            'user': user,
+            'password': password,
         }
     
     def wait_for_superset(self, max_retries: int = 40) -> bool:
@@ -261,9 +275,27 @@ class SupersetAutoConfigurator:
             existing_db = next((db for db in databases if db.get("database_name") == db_name), None)
 
             # Construir URI de conexión
-            ch_uri = (f"clickhousedb+connect://{self.clickhouse_config['user']}:"
+            # Usamos el driver HTTP estándar de Superset para ClickHouse
+            ch_uri = (f"clickhouse+http://{self.clickhouse_config['user']}:"
                      f"{self.clickhouse_config['password']}@{self.clickhouse_config['host']}:"
                      f"{self.clickhouse_config['port']}/{self.clickhouse_config['database']}")
+            
+            # Configuración avanzada para ClickHouse con mejor manejo de fechas y temporales
+            extra_config = {
+                "metadata_params": {},
+                "engine_params": {
+                    "connect_args": {
+                        "http_session_timeout": 60
+                    }
+                },
+                "metadata_cache_timeout": {},
+                "schemas_allowed_for_file_upload": [],
+                # Configuración para permitir SQL arbitrario (necesario para charts avanzados)
+                "allows_virtual_table_explore": True,
+                "allows_subquery": True,
+                "allows_cost_estimate": False,
+                "disable_data_preview": False
+            }
             
             payload = {
                 "database_name": db_name,
@@ -271,7 +303,9 @@ class SupersetAutoConfigurator:
                 "expose_in_sqllab": True,
                 "allow_ctas": True,
                 "allow_cvas": True,
-                "allow_run_async": True
+                "allow_run_async": True,
+                "allow_dml": False,
+                "extra": json.dumps(extra_config)
             }
             
             if existing_db:

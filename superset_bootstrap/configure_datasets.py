@@ -273,24 +273,172 @@ def find_dataset(url, token_ref, username, password, database_id, table_name, sc
     if resp.status_code == 200:
         results = resp.json().get("result", [])
         if results:
-            return results[0].get("id")
+            dataset_id = results[0].get("id")
+            print(f"✅ Dataset encontrado: {table_name} (ID: {dataset_id})")
+            return dataset_id
+        else:
+            print(f"⚠️  Dataset {table_name} no encontrado en búsqueda")
+    else:
+        print(f"⚠️  Error buscando dataset {table_name}: {resp.status_code}")
     return None
 
+def mark_datetime_columns(url, token_ref, username, password, dataset_id):
+    """Marca automáticamente todas las columnas DateTime/Timestamp como is_dttm=True.
+    Esto previene errores de GROUP BY en Superset cuando se usan fechas en visualizaciones.
+    """
+    try:
+        headers = {"Content-Type": "application/json"}
+        # Obtener información del dataset
+        resp = authed_request(url, "GET", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️  No se pudo obtener dataset {dataset_id}: {resp.status_code}")
+            return False
+        
+        result = resp.json().get('result', {})
+        cols = result.get('columns') or []
+        dataset_name = result.get('table_name', 'unknown')
+        
+        # Marcar todas las columnas DateTime/Timestamp como is_dttm
+        updates_needed = []
+        datetime_cols = []
+        for col in cols:
+            col_name = col.get('column_name') or col.get('name')
+            col_type = (col.get('type') or col.get('type_generic') or '').upper()
+            col_id = col.get('id')
+            is_dttm_current = col.get('is_dttm', False)
+            
+            # Detectar columnas de fecha/tiempo
+            is_datetime = any(dt in col_type for dt in ['DATE', 'TIME', 'TIMESTAMP'])
+            
+            if is_datetime and not is_dttm_current and col_id:
+                updates_needed.append({
+                    "is_dttm": True,
+                    "id": col_id,
+                    "name": col_name
+                })
+                datetime_cols.append(col_name)
+        
+        if updates_needed:
+            print(f"⏱️  Marcando {len(updates_needed)} columna(s) DateTime en {dataset_name}: {datetime_cols}")
+            # Actualizar columnas en batch
+            success_count = 0
+            for upd in updates_needed:
+                resp = authed_request(url, "PUT", f"/api/v1/dataset/{dataset_id}/column/{upd['id']}", 
+                                    token_ref, username, password, json={"is_dttm": True, "id": upd['id']}, headers=headers, timeout=10)
+                if resp.status_code in [200, 201]:
+                    success_count += 1
+                else:
+                    print(f"⚠️  Fallo marcando {upd['name']}: {resp.status_code}")
+            
+            if success_count == len(updates_needed):
+                print(f"✅ {success_count} columna(s) DateTime configuradas correctamente en {dataset_name}")
+            else:
+                print(f"⚠️  Solo {success_count}/{len(updates_needed)} columnas configuradas en {dataset_name}")
+        else:
+            print(f"ℹ️  {dataset_name}: columnas DateTime ya configuradas")
+        
+        return True
+    except Exception as e:
+        print(f"⚠️  Error marcando columnas DateTime: {e}")
+        return False
+
 def update_dataset_time_column(url, token_ref, username, password, dataset_id, time_col):
-    """Establecer la columna temporal por defecto (main_dttm_col).
+    """Establecer la columna temporal por defecto (main_dttm_col) y marcarla como is_dttm.
     Si time_col es vacío o None, no realiza cambios para evitar configuraciones erróneas.
     """
     if not time_col:
         print("ℹ️  SUPERSET_TIME_COLUMN vacío: no se configurará columna temporal por defecto")
         return True
     headers = {"Content-Type": "application/json"}
-    payload = {"main_dttm_col": time_col}
-    resp = authed_request(url, "PUT", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, json=payload, headers=headers)
-    if resp.status_code in [200, 201]:
-        print(f"⏱️  Columna de tiempo por defecto configurada: {time_col}")
-        return True
-    else:
-        print(f"⚠️  No se pudo configurar columna de tiempo ({resp.status_code}): {resp.text}")
+    
+    # Primero, obtener el dataset completo para encontrar el column_id correcto
+    try:
+        resp = authed_request(url, "GET", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            dataset = resp.json().get('result', {})
+            columns = dataset.get('columns', [])
+            
+            # Buscar la columna de tiempo y marcarla como is_dttm=True
+            time_col_found = False
+            for col in columns:
+                col_name = col.get('column_name', '')
+                col_id = col.get('id')
+                if col_name == time_col and col_id:
+                    # Actualizar la columna para marcarla como temporal
+                    col_payload = {
+                        "is_dttm": True,
+                        "python_date_format": None  # Dejar que Superset detecte automáticamente
+                    }
+                    col_resp = authed_request(url, "PUT", f"/api/v1/dataset/{dataset_id}/column/{col_id}", token_ref, username, password, json=col_payload, headers=headers)
+                    if col_resp.status_code in [200, 201]:
+                        print(f"⏱️  Columna {time_col} marcada como temporal (is_dttm=True)")
+                        time_col_found = True
+                    else:
+                        print(f"⚠️  No se pudo marcar columna {time_col} como temporal: {col_resp.status_code}")
+                    break
+            
+            if not time_col_found:
+                print(f"⚠️  Columna {time_col} no encontrada en el dataset")
+        
+        # Finalmente, establecer main_dttm_col en el dataset
+        payload = {"main_dttm_col": time_col}
+        resp = authed_request(url, "PUT", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, json=payload, headers=headers)
+        if resp.status_code in [200, 201]:
+            print(f"⏱️  Columna de tiempo por defecto configurada: {time_col}")
+            return True
+        else:
+            print(f"⚠️  No se pudo configurar columna de tiempo ({resp.status_code}): {resp.text}")
+            return False
+    except Exception as e:
+        print(f"⚠️  Error configurando columna de tiempo: {e}")
+        return False
+
+def set_dataset_default_time_grain_none(url, token_ref, username, password, dataset_id):
+    """Ajusta el Explore default para que 'Time Grain' venga en None por defecto.
+
+    Implementación: actualiza el campo 'extra' del dataset para incluir
+    extra.default_form_data.time_grain_sqla = None.
+    """
+    headers = {"Content-Type": "application/json"}
+    try:
+        # Leer dataset para obtener y fusionar 'extra'
+        resp = authed_request(url, "GET", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️  No se pudo leer dataset {dataset_id} para setear Time Grain None: {resp.status_code}")
+            return False
+        result = resp.json().get('result', {})
+        dataset_name = result.get('table_name', 'unknown')
+        extra = result.get('extra')
+
+        # 'extra' puede venir como dict o como string JSON
+        if isinstance(extra, str):
+            try:
+                extra_obj = json.loads(extra) if extra.strip() else {}
+            except Exception:
+                extra_obj = {}
+        elif isinstance(extra, dict):
+            extra_obj = dict(extra)
+        else:
+            extra_obj = {}
+
+        default_form = extra_obj.get('default_form_data') or {}
+        # Setear None explícitamente; el backend acepta null
+        default_form['time_grain_sqla'] = None
+        extra_obj['default_form_data'] = default_form
+
+        payload = {
+            # La API de datasets espera 'extra' como string JSON
+            'extra': json.dumps(extra_obj, ensure_ascii=False)
+        }
+        put = authed_request(url, "PUT", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, json=payload, headers=headers, timeout=10)
+        if put.status_code in [200, 201]:
+            print(f"🕒 Time Grain por defecto = None aplicado a dataset {dataset_name} (ID {dataset_id})")
+            return True
+        else:
+            print(f"⚠️  Falló setear Time Grain None en dataset {dataset_id}: {put.status_code} - {put.text[:180]}")
+            return False
+    except Exception as e:
+        print(f"⚠️  Error configurando default Time Grain None en dataset {dataset_id}: {e}")
         return False
 
 def parse_schemas_from_env() -> list:
@@ -438,55 +586,68 @@ def main():
             # Try to create dataset; if it already exists, find its ID and continue
             dataset_id = create_dataset(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'], table_name, SCHEMA_NAME)
             ds_id = None
+            print(f"🐛 DEBUG: create_dataset returned type={type(dataset_id)} value={dataset_id}")
             if isinstance(dataset_id, int):
                 ds_id = dataset_id
                 created_count += 1
             else:
+                print(f"🐛 DEBUG: Entrando al else, buscando dataset existente para {table_name}")
                 # dataset_id could be True (created without id) or False (not created)
+                # Siempre buscar el ID del dataset, incluso si ya existe (422)
                 found = find_dataset(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'], table_name, SCHEMA_NAME)
+                print(f"🐛 DEBUG: find_dataset returned type={type(found)} value={found}")
                 ds_id = found
+            print(f"🐛 DEBUG: Antes del if ds_id, ds_id={ds_id}, type={type(ds_id)}, bool={bool(ds_id)}")
+            # IMPORTANTE: Marcar automáticamente todas las columnas DateTime como is_dttm
+            # Esto previene errores de GROUP BY cuando se usan estas columnas en charts
+            # Se ejecuta SIEMPRE, incluso para datasets existentes, para asegurar configuración correcta
+            if ds_id:
+                print(f"🔧 Configurando columnas DateTime para dataset {table_name} (ID: {ds_id})...")
+                mark_datetime_columns(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id)
+                
                 # Determine a safe time column to set as main_dttm_col.
                 set_time_col = False
                 chosen_time_col = None
-                if ds_id:
-                    if TIME_COLUMN:
-                        chosen_time_col = TIME_COLUMN
-                        set_time_col = True
-                    else:
-                        # Try to fetch dataset detail and inspect columns
-                        try:
-                            resp = authed_request(SUPERSET_URL, "GET", f"/api/v1/dataset/{ds_id}", token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, headers={"Content-Type": "application/json"}, timeout=10)
-                            if resp.status_code == 200:
-                                result = resp.json().get('result', {})
-                                cols = result.get('columns') or []
-                                # Collect candidate names by heuristic
-                                candidates = []
-                                for c in cols:
-                                    col_name = c.get('column_name') or c.get('name') or c.get('column_name')
-                                    if not col_name:
-                                        continue
-                                    ln = col_name.lower()
-                                    if any(k in ln for k in ['date', 'fecha', 'time', 'timestamp']) or ln.endswith('_at'):
-                                        candidates.append(col_name)
-                                # Save candidates to report (even if 0 or >1)
-                                candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": candidates})
-                                # If exactly one candidate, choose it; otherwise skip to avoid wrong auto-setting
-                                if len(candidates) == 1:
-                                    chosen_time_col = candidates[0]
-                                    set_time_col = True
-                                else:
-                                    print(f"ℹ️  No se establecerá columna temporal automática para {SCHEMA_NAME}.{table_name}: candidatos={candidates}")
+                if TIME_COLUMN:
+                    chosen_time_col = TIME_COLUMN
+                    set_time_col = True
+                else:
+                    # Try to fetch dataset detail and inspect columns
+                    try:
+                        resp = authed_request(SUPERSET_URL, "GET", f"/api/v1/dataset/{ds_id}", token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, headers={"Content-Type": "application/json"}, timeout=10)
+                        if resp.status_code == 200:
+                            result = resp.json().get('result', {})
+                            cols = result.get('columns') or []
+                            # Collect candidate names by heuristic
+                            candidates = []
+                            for c in cols:
+                                col_name = c.get('column_name') or c.get('name') or c.get('column_name')
+                                if not col_name:
+                                    continue
+                                ln = col_name.lower()
+                                if any(k in ln for k in ['date', 'fecha', 'time', 'timestamp']) or ln.endswith('_at'):
+                                    candidates.append(col_name)
+                            # Save candidates to report (even if 0 or >1)
+                            candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": candidates})
+                            # If exactly one candidate, choose it; otherwise skip to avoid wrong auto-setting
+                            if len(candidates) == 1:
+                                chosen_time_col = candidates[0]
+                                set_time_col = True
                             else:
-                                print(f"⚠️  No se pudo leer metadata del dataset {ds_id}: {resp.status_code}")
-                                candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": [], "error": f"metadata_status_{resp.status_code}"})
-                        except requests.exceptions.RequestException as e:
-                            print(f"⚠️  Error buscando columnas del dataset {ds_id}: {e}")
-                            candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": [], "error": str(e)})
+                                print(f"ℹ️  No se establecerá columna temporal automática para {SCHEMA_NAME}.{table_name}: candidatos={candidates}")
+                        else:
+                            print(f"⚠️  No se pudo leer metadata del dataset {ds_id}: {resp.status_code}")
+                            candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": [], "error": f"metadata_status_{resp.status_code}"})
+                    except requests.exceptions.RequestException as e:
+                        print(f"⚠️  Error buscando columnas del dataset {ds_id}: {e}")
+                        candidates_report.append({"schema": SCHEMA_NAME, "table": table_name, "candidates": [], "error": str(e)})
 
                 if set_time_col and ds_id and chosen_time_col:
                     if update_dataset_time_column(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id, chosen_time_col):
                         time_col_set += 1
-                time.sleep(1)  # Pequeña pausa entre creaciones
+                # Asegurar que el Time Grain por defecto sea None en Explore
+                set_dataset_default_time_grain_none(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id)
+            time.sleep(1)  # Pequeña pausa entre creaciones
 
     if total_tables:
         print(f"✅ Datasets verificados/creados para {total_tables} tablas en {len(SCHEMAS)} esquema(s)")
