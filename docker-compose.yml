@@ -451,16 +451,21 @@ services:
       - CLICKHOUSE_HTTP_PORT=8123
       - CH_USER=etl
       - CH_PASSWORD=Et1Ingest!
+      # Ensure pip installs work and user has a writable home
+      - HOME=/root
+      - PIP_ROOT_USER_ACTION=ignore
     networks:
       - etl_net
     volumes:
       - ./tools:/app/tools
+      - ./generated:/app/generated
     depends_on:
       connect:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-    user: "1000:1000"
+    # Run as root to allow dependency installation and writing to /app
+    user: "0:0"
     entrypoint:
       - python
       - tools/cdc_bootstrap.py

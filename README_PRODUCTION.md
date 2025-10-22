@@ -179,7 +179,20 @@ docker compose exec kafka kafka-topics --bootstrap-server kafka:9092 --list | gr
 docker compose exec kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic dbserver_default.archivos.archivos --from-beginning --max-messages 5
 ```
 
-## 📁 Estructura del Proyecto
+## � Nota sobre CDC Bootstrap y permisos
+
+Para evitar errores de permisos durante el paso de CDC (instalación de dependencias y generación/aplicación de artefactos):
+
+- El servicio `cdc-bootstrap` corre como `root` y define `HOME=/root` para que `pip` pueda instalar paquetes en contenedores base slim.
+- Se monta el directorio `./generated` en `/app/generated` para garantizar escritura de artefactos (conectores y SQLs) desde el bootstrap.
+- Variables relevantes en `docker-compose.yml` dentro de `cdc-bootstrap`:
+    - `user: "0:0"`
+    - `environment: [HOME=/root, PIP_ROOT_USER_ACTION=ignore]`
+    - `volumes: [./generated:/app/generated]`
+
+Con esto, el paso 5/5 (Bootstrap CDC) se ejecuta de forma idempotente y sin errores de permisos.
+
+## �📁 Estructura del Proyecto
 
 ```
 etl_prod/
