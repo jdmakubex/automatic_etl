@@ -176,7 +176,6 @@ services:
       - "8123:8123"     # HTTP
       - "9000:9000"     # Native TCP (para Python driver)
     volumes:
-      - ch_data:/var/lib/clickhouse  # Volumen persistente para datos
       - ./bootstrap:/app:ro
       - ./bootstrap/clickhouse_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
       - ./bootstrap/create_users.sql:/docker-entrypoint-initdb.d/01_create_users.sql:ro

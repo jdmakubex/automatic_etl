@@ -8,11 +8,16 @@
 FROM python:3.11-slim
 WORKDIR /app
 # Instala herramientas de red y utilidades para robustez y comunicación
-RUN apt-get update && apt-get install -y file coreutils bash curl wget gnupg lsb-release netcat-openbsd iputils-ping \
+# Incluye clickhouse-client para verificaciones directas
+RUN apt-get update && apt-get install -y file coreutils bash curl wget gnupg lsb-release netcat-openbsd iputils-ping apt-transport-https ca-certificates \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && apt-get update \
     && apt-get install -y docker-ce-cli docker-compose-plugin \
+    && curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list \
+    && apt-get update \
+    && apt-get install -y clickhouse-client \
     && rm -rf /var/lib/apt/lists/*
 
 

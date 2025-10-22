@@ -243,6 +243,80 @@ def write_ch_raw_script(conn_name, tables, out_dir):
     (out_dir / "ch_create_raw_pipeline.sh").write_text("\n".join(sh) + "\n", encoding="utf-8")
     os.chmod(out_dir / "ch_create_raw_pipeline.sh", 0o755)
 
+def write_ch_raw_sql(conn_name, tables, out_dir):
+    """Generate a single idempotent SQL file to create Kafka engines, raw tables and MVs.
+    Avoids docker/quoting issues by allowing HTTP application directly.
+    """
+    ch_db = os.getenv("CLICKHOUSE_DATABASE","fgeo_analytics")
+    brokers = os.getenv("KAFKA_BROKERS","kafka:9092")
+    prefix = os.getenv("DBZ_SERVER_NAME_PREFIX","dbserver")
+    lines: list[str] = []
+    lines.append("CREATE DATABASE IF NOT EXISTS ext;")
+    lines.append(f"CREATE DATABASE IF NOT EXISTS {ch_db};")
+    lines.append("")
+
+    # Pre-drop objects for idempotency
+    for t in tables:
+        schema, table = t["schema"], t["table"]
+        kafka_tbl = f"ext.kafka_{schema}_{table}"
+        raw_tbl = f"{ch_db}.{schema}_{table}_raw"
+        mv_tbl = f"ext.mv_{schema}_{table}"
+        src_tbl = f"{ch_db}.src__{conn_name}__{schema}__{table}"
+        lines.append(f"DROP VIEW IF EXISTS {mv_tbl};")
+        lines.append(f"DROP TABLE IF EXISTS {raw_tbl};")
+        lines.append(f"DROP TABLE IF EXISTS {kafka_tbl};")
+        lines.append(f"DROP TABLE IF EXISTS {src_tbl};")
+    lines.append("")
+
+    # Create Kafka/raw/MV and source table
+    for t in tables:
+        schema, table = t["schema"], t["table"]
+        kafka_tbl = f"ext.kafka_{schema}_{table}"
+        raw_tbl = f"{ch_db}.{schema}_{table}_raw"
+        mv_tbl = f"ext.mv_{schema}_{table}"
+        src_tbl = f"{ch_db}.src__{conn_name}__{schema}__{table}"
+        topic = f"{prefix}_{conn_name}.{schema}.{table}"
+
+        # Kafka and RAW
+        lines += [
+            f"CREATE TABLE IF NOT EXISTS {kafka_tbl} (value String) ENGINE = Kafka",
+            f"SETTINGS kafka_broker_list='{brokers}', kafka_topic_list='{topic}',",
+            f"         kafka_group_name='ch_consumer_{schema}_{table}',",
+            f"         kafka_format='JSONAsString', kafka_num_consumers=1;",
+            "",
+            f"CREATE TABLE IF NOT EXISTS {raw_tbl} (ingested_at DateTime DEFAULT now(), value String)",
+            "ENGINE = MergeTree ORDER BY ingested_at;",
+            "",
+            f"CREATE MATERIALIZED VIEW IF NOT EXISTS {mv_tbl} TO {raw_tbl}",
+            f"AS SELECT now() AS ingested_at, value FROM {kafka_tbl};",
+            "",
+        ]
+
+        # Source table definition from real columns
+        cols = fetch_columns(get_conns()[0], schema, table)
+        def map_type(dtype: str) -> str:
+            t = (dtype or "").lower()
+            mapping = {
+                "int": "Int32", "bigint": "Int64", "tinyint": "Int8", "smallint": "Int16", "mediumint": "Int32",
+                "varchar": "String", "char": "String", "text": "String", "enum": "String", "set": "String",
+                "datetime": "DateTime", "date": "Date", "timestamp": "DateTime",
+                "decimal": "Decimal(18,0)", "float": "Float32", "double": "Float64", "real": "Float64",
+                "blob": "String", "binary": "String", "varbinary": "String", "json": "String"
+            }
+            for k, v in mapping.items():
+                if k in t:
+                    return v
+            return "String"
+        col_defs = ", ".join([f"{c['name']} {map_type(c['dtype'])}" for c in cols])
+        order_by = cols[0]['name'] if cols else 'tuple()'
+        lines += [
+            f"CREATE TABLE IF NOT EXISTS {src_tbl} ({col_defs}) ENGINE = MergeTree ORDER BY {order_by};",
+            "",
+        ]
+
+    sql_path = out_dir / "ch_create_raw_pipeline.sql"
+    sql_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 def main():
     print("[ETL][START] Proceso principal iniciado.")
     OUT.mkdir(parents=True, exist_ok=True)
@@ -270,6 +344,8 @@ def main():
         )
         print(f"[ETL][{conn_name}] Generando script de creación de tablas en ClickHouse...")
         write_ch_raw_script(conn_name, tables, out_dir)
+        # También generamos un SQL idempotente para aplicar vía HTTP
+        write_ch_raw_sql(conn_name, tables, out_dir)
 
         for t in tables:
             print(f"[ETL][{conn_name}] Generando schema JSON para {t['schema']}.{t['table']}...")

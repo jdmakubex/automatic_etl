@@ -95,14 +95,26 @@ def validate_db_connections(db_connections_json: str) -> List[Dict]:
         )
     
     # Validar estructura de cada conexión
-    required_fields = ['name', 'type', 'host', 'port', 'user', 'pass', 'db']
+    # 'type' debe ser opcional; por compatibilidad asumimos 'mysql' si no se especifica
+    required_fields = ['name', 'host', 'port', 'user', 'pass', 'db']
     for i, conn in enumerate(connections):
         if not isinstance(conn, dict):
             raise ValidationError(f"Conexión {i}: debe ser un diccionario, recibido: {type(conn).__name__}")
         
+        # Campos estrictamente requeridos
         for field in required_fields:
             if field not in conn:
                 raise ValidationError(f"Conexión {i}: campo requerido '{field}' faltante")
+
+        # Ajustes de compatibilidad: completar valores por defecto si faltan
+        # type: por defecto 'mysql'
+        if 'type' not in conn or not conn.get('type'):
+            conn['type'] = 'mysql'
+        # Normalizar puerto a int si viene como string
+        try:
+            conn['port'] = int(conn['port'])
+        except Exception:
+            raise ValidationError(f"Conexión {i}: campo 'port' debe ser numérico")
     
     return connections
 

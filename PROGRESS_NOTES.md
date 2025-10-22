@@ -168,3 +168,41 @@ docker compose up -d
 ---
 
 **Último estado:** Servicios principales funcionando, falta resolver transferencia completa de datos MySQL → ClickHouse.
+
+---
+
+## 🧭 Bitácora – 16 de Octubre, 2025
+
+Contexto rápido:
+- Hay dos “fuentes” visibles en Superset porque ClickHouse expone bases diferentes como “esquemas”:
+  - `fiscalizacion` (tablas crudas de ingesta)
+  - `fiscalizacion_analytics` (vistas para BI). Ej.: `fiscalizacion_bitacora_v` con `fecha_date` (Date) derivada.
+- Ingesta verificada: tablas con datos (p.ej. bitácora ~513k filas). Superset operativo (admin/admin).
+- Error típico de fechas en Superset: ocurre si se mezcla columna temporal con time grain y otras columnas no agregadas/agrupadas.
+
+Pendiente por hacer (NO ejecutar ahora):
+1) Restringir esquemas visibles en Superset (dejar solo analytics)
+  - Opción A (recomendada): crear usuario ClickHouse de solo lectura con permisos en `fiscalizacion_analytics` y reconfigurar la conexión en Superset para usar ese usuario.
+  - Opción B: conservar conexión actual, pero registrar datasets únicamente del esquema `fiscalizacion_analytics` y eliminar los del esquema base `fiscalizacion` para evitar duplicados.
+
+2) Limpiar datasets del esquema base en Superset
+  - Identificar datasets asociados al esquema `fiscalizacion` y eliminarlos desde Superset (UI o API) dejando únicamente los de `fiscalizacion_analytics`.
+
+3) Asegurar columna temporal por defecto
+  - En los datasets de `fiscalizacion_analytics`, confirmar que `fecha_date` sea la columna temporal por defecto (main_dttm_col), de forma que los charts no fallen al aplicar time grain.
+
+4) Guía de uso para evitar errores de fecha en Explore
+  - Para series temporales: usar dataset `fiscalizacion_analytics.*`, seleccionar `fecha_date` como Time column y elegir un Time grain (Day/Month/etc.), añadir métricas (Count o agregaciones) y evitar colocar columnas no agregadas sin agrupar.
+  - Para registros detallados: cambiar Query mode a Raw Records (sin time grain) o usar filtros de rango por `fecha_date`.
+
+Notas técnicas para implementación posterior:
+- Script de datasets (`superset_bootstrap/configure_datasets.py`) se puede parametrizar con:
+  - SUPERSET_SCHEMA=fiscalizacion_analytics
+  - SUPERSET_TIME_COLUMN=fecha_date
+- Vista creada: `fiscalizacion_analytics.fiscalizacion_bitacora_v` con `fecha_date=toDate(fecha)`.
+
+Checklist de próxima sesión:
+- [ ] Crear usuario `superset_ro` en ClickHouse con SELECT solo en `fiscalizacion_analytics` y probar conexión.
+- [ ] Reconfigurar conexión de Superset a ese usuario para ocultar esquema base.
+- [ ] Eliminar datasets del esquema `fiscalizacion` (si se decide mantener una sola fuente visible).
+- [ ] Validar que los charts con `fecha_date` no generen errores de agregación.

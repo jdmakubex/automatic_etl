@@ -20,7 +20,7 @@ SUPERSET_URL = os.environ.get("SUPERSET_URL", "http://superset:8088")
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
 CLICKHOUSE_HTTP_PORT = os.environ.get("CLICKHOUSE_HTTP_PORT", "8123")
 CLICKHOUSE_TCP_PORT = os.environ.get("CLICKHOUSE_TCP_PORT", "9000")
-CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "superset")
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "superset_ro")
 CLICKHOUSE_PASSWORD = os.environ.get("CLICKHOUSE_PASSWORD", "Sup3rS3cret!")
 CLICKHOUSE_DATABASE = os.environ.get("CLICKHOUSE_DATABASE", "fgeo_analytics")
 

@@ -31,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class MultiDatabaseConfigurator:
+
     def __init__(self):
         """Inicializa el configurador multi-base de datos"""
         self.superset_url = os.getenv("SUPERSET_URL", "http://superset:8088")
@@ -39,12 +40,10 @@ class MultiDatabaseConfigurator:
         self.db_connections_json = os.getenv("DB_CONNECTIONS", "[]")
         self.clickhouse_host = os.getenv("CLICKHOUSE_HTTP_HOST", "clickhouse")
         self.clickhouse_port = os.getenv("CLICKHOUSE_HTTP_PORT", "8123")
-        self.clickhouse_user = os.getenv("CLICKHOUSE_USER", "superset")
+        self.clickhouse_user = os.getenv("CLICKHOUSE_USER", "superset_ro")
         self.clickhouse_password = os.getenv("CLICKHOUSE_PASSWORD", "Sup3rS3cret!")
-        
         self.session = requests.Session()
         self.csrf_token = None
-        
         logger.info("🔧 Inicializando Multi-Database Configurator")
         
     def parse_database_connections(self) -> List[Dict[str, Any]]:

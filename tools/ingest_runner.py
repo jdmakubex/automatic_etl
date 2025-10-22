@@ -226,59 +226,81 @@ def _parse_maybe_datetime_series(s: pd.Series) -> pd.Series:
 
 def process_mysql_date_columns(df: pd.DataFrame, mysql_column_info: dict) -> pd.DataFrame:
     """
-    Procesa específicamente campos DATE de MySQL para compatibilidad con Superset.
+    Procesa específicamente campos DATE/DATETIME de MySQL para compatibilidad con ClickHouse.
     
     Estrategia:
-    1. Campos DATE inválidos (1900-01-01, 0000-00-00) → NULL
-    2. Campos DATE válidos → mantener como fecha
-    3. Usar Date en lugar de DateTime cuando es apropiado
+    1. Convertir object a datetime si es campo temporal MySQL
+    2. Campos DATE inválidos (1900-01-01, 0000-00-00, NULL strings) → NULL
+    3. Campos DATE válidos → mantener como datetime
     4. Logging detallado para troubleshooting
     """
     for col in df.columns:
         # Manejar tanto formato dict como string para column_types
         col_info = mysql_column_info.get(col, '')
         if isinstance(col_info, dict):
-            mysql_type = col_info.get('mysql_type', '').lower()
+            # Aceptar 'mysql_type' (preferido) o 'type' (compatibilidad)
+            mysql_type = (col_info.get('mysql_type') or col_info.get('type') or '').lower()
         else:
             mysql_type = str(col_info).lower()
         
-        # Solo procesar campos DATE específicos de MySQL
-        if mysql_type and 'date' in mysql_type and not any(x in mysql_type for x in ['datetime', 'timestamp']):
-            log.info(f"🗓️ Procesando campo DATE MySQL: {col} (tipo: {mysql_type})")
+        # Procesar campos DATE, DATETIME, TIMESTAMP de MySQL
+        is_temporal = mysql_type and any(x in mysql_type for x in ['date', 'datetime', 'timestamp'])
+        
+        if is_temporal:
+            log.info(f"🗓️ Procesando campo temporal MySQL: {col} (tipo: {mysql_type})")
             
-            # Procesar tanto datetime64 como object (que puede contener date objects)
             col_dtype = str(df[col].dtype)
-            if col_dtype.startswith('datetime64') or col_dtype == 'object':
-                series = df[col]
-                processed_dates = []
+            series = df[col]
+            processed_dates = []
+            
+            for i, value in enumerate(series):
+                # NULL explícito
+                if pd.isna(value) or value is None:
+                    processed_dates.append(None)
+                    continue
                 
-                for i, value in enumerate(series):
-                    if pd.isna(value) or value is None:
+                # String: puede ser fecha válida o inválida (0000-00-00)
+                if isinstance(value, str):
+                    value_clean = value.strip()
+                    # Fechas inválidas comunes en MySQL
+                    if value_clean in ('', '0000-00-00', '0000-00-00 00:00:00', 'NULL', 'None'):
                         processed_dates.append(None)
                         continue
-                    
-                    # Convertir a datetime si es necesario
-                    if isinstance(value, pd.Timestamp):
-                        dt = value.to_pydatetime()
-                    elif isinstance(value, datetime.datetime):
-                        dt = value
-                    elif isinstance(value, datetime.date):
-                        dt = datetime.datetime(value.year, value.month, value.day)
-                    else:
+                    # Intentar parsear
+                    try:
+                        dt = pd.to_datetime(value_clean, errors='raise')
+                        if isinstance(dt, pd.Timestamp):
+                            dt = dt.to_pydatetime()
+                    except:
+                        log.warning(f"⚠️ No se pudo parsear fecha en {col}[{i}]: '{value_clean}' → NULL")
                         processed_dates.append(None)
                         continue
-                    
-                    # Validar fechas problemáticas comunes en MySQL para Superset
-                    if dt.year <= 1900 or dt.year >= 2100:
-                        log.info(f"🚫 Fecha inválida en {col}[{i}]: {dt} → NULL (fuera de rango útil para Superset)")
-                        processed_dates.append(None)
-                    else:
-                        # Fecha válida - mantener como datetime para ClickHouse
-                        processed_dates.append(dt)
+                # Ya es Timestamp/datetime
+                elif isinstance(value, pd.Timestamp):
+                    dt = value.to_pydatetime()
+                elif isinstance(value, datetime.datetime):
+                    dt = value
+                elif isinstance(value, datetime.date):
+                    dt = datetime.datetime(value.year, value.month, value.day)
+                else:
+                    # Tipo inesperado
+                    log.warning(f"⚠️ Tipo inesperado en {col}[{i}]: {type(value)} → NULL")
+                    processed_dates.append(None)
+                    continue
                 
-                # Asignar la serie procesada
-                df[col] = processed_dates
-                log.info(f"✅ Campo {col} procesado: {len([x for x in processed_dates if x is not None])} fechas válidas, {len([x for x in processed_dates if x is None])} NULLs")
+                # Validar rango de fechas (ClickHouse y Superset tienen límites)
+                if dt.year == 0 or dt.year <= 1900 or dt.year >= 2100:
+                    log.debug(f"🚫 Fecha inválida en {col}[{i}]: {dt} → NULL (fuera de rango útil)")
+                    processed_dates.append(None)
+                else:
+                    # Fecha válida
+                    processed_dates.append(dt)
+            
+            # Asignar la serie procesada
+            df[col] = processed_dates
+            valid_count = len([x for x in processed_dates if x is not None])
+            null_count = len([x for x in processed_dates if x is None])
+            log.info(f"✅ Campo {col} procesado: {valid_count} fechas válidas, {null_count} NULLs")
     
     return df
 
@@ -1217,8 +1239,29 @@ def build_create_table_sql(
     engine_sql = engine
     if engine.upper().startswith("REPLACINGMERGETREE") and version_col:
         engine_sql = f"ReplacingMergeTree({version_col})"
-    # Si no hay order_by, usar la primera columna; nunca '_dummy_'
-    order_sql = ", ".join(f"`{c}`" for c in (order_by if order_by else [columns[0][0]]))
+    
+    # 🔧 Si no hay order_by, buscar primera columna NOT NULL (evitar Nullable en sorting key)
+    if not order_by:
+        # Buscar primera columna que NO sea Nullable
+        not_null_cols = [col_name for col_name, col_type in columns if "Nullable(" not in col_type]
+        if not_null_cols:
+            order_by = [not_null_cols[0]]
+            log.info(f"✅ Usando columna NOT NULL '{order_by[0]}' como ORDER BY fallback para {full_table}")
+        else:
+            # Caso extremo: todas las columnas son nullable -> usar tuple()
+            log.warning(f"⚠️ Todas las columnas son Nullable en {full_table}. Usando ORDER BY tuple()")
+            order_sql = "tuple()"
+            part_sql = f"\nPARTITION BY {partition_by}" if partition_by else ""
+            return f"""
+CREATE TABLE IF NOT EXISTS {full_table}
+(
+  {cols_sql}
+)
+ENGINE = {engine_sql}
+ORDER BY {order_sql}{part_sql}
+    """.strip()
+    
+    order_sql = ", ".join(f"`{c}`" for c in order_by)
     part_sql = f"\nPARTITION BY {partition_by}" if partition_by else ""
     return f"""
 CREATE TABLE IF NOT EXISTS {full_table}
@@ -1245,6 +1288,9 @@ def ensure_ch_table(
     Crea la tabla destino si no existe.
     - Si dedup_mode=replacing y se provee unique_key/version_col -> usa ReplacingMergeTree(version_col) ORDER BY unique_key
     - Si dedup_mode en otro caso -> MergeTree ORDER BY (unique_key) si está; si no, ORDER BY tuple()
+    
+    🔧 IMPORTANTE: Filtra automáticamente columnas Nullable() del ORDER BY para evitar error 
+    "Sorting key contains nullable columns" en ClickHouse.
     """
     if not source_table_exists(src_engine, schema, src_table):
         log.warning(
@@ -1255,12 +1301,48 @@ def ensure_ch_table(
     ins = inspect(src_engine)
     columns = map_sqlalchemy_to_ch(ins, src_engine, schema, src_table)
 
+    # Construir mapeo de nombres de columna a tipos ClickHouse
+    column_type_map = {col_name: col_type for col_name, col_type in columns}
+
     engine_name = "MergeTree"
-    order_by = [unique_key] if unique_key else []
+    order_by_candidates = [unique_key] if unique_key else []
+    
+    # 🔧 FILTRAR columnas nullable del ORDER BY
+    # ClickHouse no permite columnas Nullable() en sorting key por defecto
+    order_by = []
+    for col in order_by_candidates:
+        if col in column_type_map:
+            col_type = column_type_map[col]
+            if "Nullable(" in col_type:
+                log.warning(
+                    f"⚠️ Columna '{col}' es Nullable y será excluida del ORDER BY "
+                    f"para tabla {schema}.{src_table} (tipo: {col_type})"
+                )
+            else:
+                order_by.append(col)
+        else:
+            # Columna no encontrada en schema, mantenerla si existe
+            order_by.append(col)
+    
+    # Si unique_key era nullable y fue filtrado, buscar alternativa NOT NULL
+    if unique_key and unique_key not in order_by:
+        log.warning(
+            f"⚠️ unique_key '{unique_key}' fue filtrado por ser Nullable. "
+            f"Buscando columna alternativa NOT NULL para ORDER BY..."
+        )
+        # Intentar usar columnas NOT NULL como ORDER BY
+        not_null_cols = [col_name for col_name, col_type in columns if "Nullable(" not in col_type]
+        if not_null_cols:
+            order_by = [not_null_cols[0]]  # Usar primera columna NOT NULL
+            log.info(f"✅ Usando columna '{order_by[0]}' (NOT NULL) como ORDER BY")
+        else:
+            log.warning(f"⚠️ Todas las columnas son Nullable. ORDER BY será tuple()")
+    
     if dedup_mode == "replacing" and unique_key and version_col:
         engine_name = "ReplacingMergeTree"
+    
     if not order_by:
-        # orden por nada: tuple()
+        # orden por nada: tuple() - ClickHouse lo permite para tablas sin sorting key
         order_by = []
 
     full_name = f"{database}.{table}"
@@ -1364,9 +1446,11 @@ def get_mysql_column_types(connection, schema: str, table: str) -> dict:
             elif 'float' in mysql_type or 'double' in mysql_type:
                 pandas_dtype = 'Float64'  # Nullable float
             elif 'datetime' in mysql_type or 'timestamp' in mysql_type:
-                pandas_dtype = 'datetime64[ns]'  # Fechas con tiempo completas
+                # Leer como object para manejar valores inválidos (0000-00-00), luego convertir
+                pandas_dtype = 'object'  # Evita errores con fechas inválidas en MySQL
             elif mysql_type.startswith('date'):  # DATE específico (solo fecha sin hora)
-                pandas_dtype = 'datetime64[ns]'  # Convertir a datetime para compatibilidad
+                # Leer como object para manejar 0000-00-00, se convierte después
+                pandas_dtype = 'object'  # Evita errores con fechas MySQL inválidas
             elif 'time' in mysql_type:
                 pandas_dtype = 'object'  # TIME como object para poder procesarlo después
             elif 'bool' in mysql_type or mysql_type.startswith('tinyint(1)'):
@@ -1451,14 +1535,41 @@ def dedup_and_swap_clickhouse(
 ):
     """
     Crea una tabla temporal deduplicada con window function y hace swap atómico.
+    🔧 IMPORTANTE: Detecta automáticamente el ORDER BY de la tabla original para evitar 
+    problemas con columnas nullable en sorting key.
     """
     final = f"{database}.{final_table}"
     tmp = f"{database}.tmp__{final_table}__dedup"
     old = f"{database}.{final_table}__old"
 
-    # 1) Crear tabla tmp (estructura = final)
+    # 🔧 Obtener el ORDER BY actual de la tabla final
+    # ClickHouse permite consultar la definición de la tabla
+    try:
+        result = client.query(f"SHOW CREATE TABLE {final}")
+        create_stmt = result.result_rows[0][0] if result.result_rows else ""
+        
+        # Extraer ORDER BY de la sentencia CREATE TABLE
+        import re
+        order_by_match = re.search(r'ORDER BY\s+\(([^)]+)\)', create_stmt, re.IGNORECASE)
+        
+        if order_by_match:
+            order_by_clause = order_by_match.group(1)
+            log.info(f"✅ ORDER BY detectado de tabla original: ({order_by_clause})")
+        else:
+            # Fallback: usar unique_key si existe, sino tuple()
+            order_by_clause = f"`{unique_key}`" if unique_key else "tuple()"
+            log.warning(
+                f"⚠️ No se pudo extraer ORDER BY de {final}. "
+                f"Usando fallback: ({order_by_clause})"
+            )
+    except Exception as e:
+        log.warning(f"⚠️ Error obteniendo CREATE TABLE de {final}: {e}")
+        # Fallback seguro: usar tuple() si no podemos detectar
+        order_by_clause = "tuple()"
+
+    # 1) Crear tabla tmp (estructura = final con ORDER BY detectado)
     client.query(f"DROP TABLE IF EXISTS {tmp}")
-    client.query(f"CREATE TABLE {tmp} AS {final} ENGINE=MergeTree ORDER BY `{unique_key}`")
+    client.query(f"CREATE TABLE {tmp} AS {final} ENGINE=MergeTree ORDER BY ({order_by_clause})")
 
     # 2) Insertar deduplicado
     # Usamos row_number() para quedarnos con la versión más reciente
@@ -1921,8 +2032,16 @@ def parse_args():
                    help="Nombre lógico de la fuente (para prefijos y DB_CONNECTIONS legado)")
 
     # Alcance
-    p.add_argument("--schemas", nargs="+", default=os.getenv("SCHEMAS", "archivos").split(),
-                   help="Schemas a ingerir")
+    p.add_argument(
+        "--schemas",
+        nargs="+",
+        default=None,
+        help=(
+            "Schemas a ingerir. Si omites este argumento o usas 'auto', el sistema intentará "
+            "descubrir dinámicamente los schemas relevantes (por ejemplo 'archivos' y el nombre de la base). "
+            "Ejemplos: --schemas archivos catalogosgral  |  --schemas auto"
+        ),
+    )
     p.add_argument("--include", nargs="*", default=[], help="Lista blanca de tablas (schema.table)")
     p.add_argument("--exclude", nargs="*", default=[], help="Lista negra de tablas (schema.table)")
 
@@ -2016,6 +2135,31 @@ def main():
 
 
     # Descubrir tablas
+    # Autodetección de schemas si no se proporcionaron o si se pidió 'auto'
+    if args.schemas is None or args.schemas == ["auto"]:
+        detected = []
+        try:
+            insp = inspect(src_engine)
+            # Candidatos: 'archivos' y el nombre de la base actual
+            candidate_db = src_engine.url.database
+            for cand in {"archivos", candidate_db}:
+                if not cand:
+                    continue
+                try:
+                    tables = insp.get_table_names(schema=cand)
+                    if tables:
+                        detected.append(cand)
+                except Exception as e:
+                    log.debug(f"Schema candidato '{cand}' no usable: {e}")
+            # Si ninguno detectado, como último recurso intentar schema=nombre_db aunque no listó tablas (para fallback SHOW TABLES)
+            if not detected and candidate_db:
+                detected.append(candidate_db)
+            args.schemas = sorted(set(detected)) if detected else ["archivos"]
+            log.info(f"📌 Schemas auto-detectados: {args.schemas}")
+        except Exception as e:
+            log.warning(f"Fallo autodetección de schemas, se usará 'archivos': {e}")
+            args.schemas = ["archivos"]
+
     all_pairs = list_tables(src_engine, args.schemas)  # [(schema, table)]
     include_set = set(args.include) if args.include else None
     exclude_set = set(args.exclude) if args.exclude else set()

@@ -70,7 +70,10 @@ def env_get(name: str, default: str) -> str:
 def apply_connectors():
     log.info("[CDC] Aplicando conectores Debezium…")
     try:
-        sh([sys.executable, "tools/apply_connectors.py"])
+        env = os.environ.copy()
+        # Asegurar que el aplicador busque recursivo en 'generated/'
+        env.setdefault("CONNECTORS_PATH", "generated")
+        sh([sys.executable, "tools/apply_connectors.py"], env=env)
         log.info("[CDC] ✓ Conectores aplicados correctamente")
     except RecoverableError as e:
         log.warning(f"[CDC] Error aplicando conectores (continuando): {e}")
@@ -96,14 +99,22 @@ def generate_pipeline():
 
 def apply_sql_via_http(sql_path: Path, ch_host: str, ch_port: str, ch_db: str, ch_user: str, ch_pass: str):
     import requests  # type: ignore
-    with open(sql_path, "rb") as fh:
+    sql_text = sql_path.read_text(encoding="utf-8")
+    # Split into individual statements; naive split on ';' is OK for our generated SQL
+    # Filter out empty/whitespace-only pieces
+    stmts = [s.strip() for s in sql_text.split(";") if s.strip()]
+    for stmt in stmts:
         r = requests.post(
             f"http://{ch_host}:{ch_port}/",
             params={"database": ch_db, "max_execution_time": "60"},
-            data=fh.read(),
+            data=(stmt + ";\n").encode("utf-8"),
             auth=(ch_user, ch_pass),
         )
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            logging.error("[CH][HTTP] %s\n%s\n[SQL]\n%s", e, (r.text or "<sin cuerpo>"), stmt)
+            raise
 
 def apply_sql_files(ch_host: str, ch_port: str, ch_db: str, ch_user: str, ch_pass: str) -> int:
     patterns = ["generated/**/*.sql", "generated/*/*.sql"]
@@ -163,7 +174,11 @@ docker() {
   if [ "$1" = "exec" ] && [ "$2" = "-i" ] && [ "$3" = "clickhouse" ]; then
     shift 3
     if [ "$1" = "bash" ] && [ "$2" = "-lc" ]; then
-      shift 2; bash -lc "$*"; return $?
+            # Preserve the exact single string argument passed to -lc
+            # Using "$*" would lose original quoting and break multi-statement SQL.
+            local cmd
+            cmd="$3"
+            bash -lc "$cmd"; return $?
     fi
     if [ "$1" = "clickhouse-client" ]; then
       shift; clickhouse-client "$@"; return $?
@@ -175,7 +190,8 @@ docker() {
 export -f docker
 
 APPLIED=0
-shopt -s nullglob
+# Enable globstar for ** and avoid literal patterns when empty
+shopt -s nullglob globstar
 for shf in generated/*/ch_create_raw_pipeline.sh generated/**/ch_create_raw_pipeline.sh; do
   echo "[CDC] bash $shf"
   if bash "$shf"; then
@@ -196,6 +212,11 @@ echo "APPLIED=$APPLIED"
         "CH_PASS": ch_pass,
     })
     res = sh(["bash", "-lc", bash_script], env=env, capture_output=True, text=True)
+    # Emit captured output for debugging/visibility
+    if res.stdout:
+        logging.info("[WRAP-OUT]\n%s", res.stdout.strip())
+    if res.stderr:
+        logging.warning("[WRAP-ERR]\n%s", res.stderr.strip())
     # parsea la última línea "APPLIED=N"
     last = res.stdout.strip().splitlines()[-1] if res.stdout else ""
     if last.startswith("APPLIED="):

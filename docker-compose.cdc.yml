@@ -1,0 +1,132 @@
+# Docker Compose - Solo Profile CDC
+# Este archivo contiene únicamente los servicios necesarios para CDC (Change Data Capture)
+
+networks:
+  etl_net:
+    name: etl_prod_etl_net
+
+volumes:
+  ch_data:
+  kafka_data:
+  connect_data:
+
+services:
+  # ---------- CLICKHOUSE ----------
+  clickhouse:
+    build:
+      context: .
+      dockerfile: clickhouse.Dockerfile
+    container_name: clickhouse
+    networks:
+      - etl_net
+    env_file:
+      - .env
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fgeo_analytics}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_USER=${CLICKHOUSE_DEFAULT_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_DEFAULT_PASSWORD:-ClickHouse123!}
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_NATIVE_PORT=9000
+    ports:
+      - "8123:8123"     # HTTP
+      - "9000:9000"     # Native TCP
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ./bootstrap/clickhouse_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+      - ./bootstrap/create_users.sql:/docker-entrypoint-initdb.d/01_create_users.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user=${CLICKHOUSE_DEFAULT_USER:-default} --password=${CLICKHOUSE_DEFAULT_PASSWORD:-ClickHouse123!} --query='SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ---------- KAFKA (KRaft mode) ----------
+  kafka:
+    image: confluentinc/cp-kafka:8.0.1
+    container_name: kafka
+    networks:
+      - etl_net
+    ports:
+      - "19092:19092"
+    environment:
+      - CLUSTER_ID=${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:19092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://host.docker.internal:19092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ---------- KAFKA CONNECT con Debezium ----------
+  connect:
+    image: debezium/connect:2.6
+    container_name: connect
+    networks:
+      - etl_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:9092
+      - GROUP_ID=1
+      - CONFIG_STORAGE_TOPIC=connect_configs
+      - OFFSET_STORAGE_TOPIC=connect_offsets
+      - STATUS_STORAGE_TOPIC=connect_statuses
+      - KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - REST_ADVERTISED_HOST_NAME=connect
+      - REST_PORT=8083
+    ports:
+      - "8083:8083"
+    volumes:
+      - connect_data:/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+
+  # ---------- CDC BOOTSTRAP ----------
+  cdc-bootstrap:
+    image: python:3.11-slim
+    container_name: cdc-bootstrap
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      - CONNECT_URL=http://connect:8083
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fgeo_analytics}
+      - DB_CONNECTIONS=${DB_CONNECTIONS}
+      - CLICKHOUSE_HTTP_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CH_USER=etl
+      - CH_PASSWORD=Et1Ingest!
+    networks:
+      - etl_net
+    volumes:
+      - ./tools:/app/tools
+    depends_on:
+      connect:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    entrypoint:
+      - python3
+      - tools/cdc_bootstrap.py
+    restart: "no"

@@ -3,15 +3,26 @@ generated/**
 # Excepto el marcador para mantener la carpeta en el repo
 !generated/.gitkeep
 
-# Environment files
+# Environment files - NUNCA subir credenciales
 .env
 .env.*
 !.env.example
 
-# Logs and temporary files
+# Logs and temporary files - NUNCA subir información sensible
 logs/**
 *.log
 !logs/.gitkeep
+
+# Documentation notes - NUNCA subir información de tablas/datos
+*_NOTES.md
+PROGRESS_NOTES.md
+DEBUG_*.md
+DATETIME_*.md
+INTEGRATION_*.md
+AUTOMATION_*.md
+VERIFY_*.md
+FINAL_*.md
+README_OLD_WITH_SENSITIVE_DATA.md
 
 # Python cache
 __pycache__/

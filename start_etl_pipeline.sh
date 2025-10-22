@@ -179,19 +179,16 @@ check_dependencies() {
     print_success "Todas las dependencias verificadas"
 }
 
-# Función para crear red Docker si no existe
+# Función para asegurar red Docker (delegar a Compose y evitar etiquetas inválidas)
 ensure_docker_network() {
     print_info "Verificando red Docker..."
-    
     NETWORK_NAME="etl_prod_etl_net"
-    
-    if ! docker network inspect "$NETWORK_NAME" &> /dev/null; then
-        print_info "Creando red Docker: $NETWORK_NAME"
-        docker network create "$NETWORK_NAME"
-        print_success "Red Docker creada"
-    else
-        print_success "Red Docker ya existe"
+    # Si existe una red previa sin etiquetas de compose correctas, eliminarla
+    if docker network inspect "$NETWORK_NAME" &> /dev/null; then
+        print_info "Eliminando red existente para que Docker Compose la recree con etiquetas correctas..."
+        docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
     fi
+    print_success "Docker Compose creará la red automáticamente"
 }
 
 # Función para limpiar servicios previos si es necesario
@@ -245,24 +242,54 @@ wait_for_services() {
     print_info "Esperando a que los servicios estén listos..."
     
     # Esperar ClickHouse
-    print_info "⏳ Esperando ClickHouse..."
-    timeout 120 bash -c 'until docker compose exec clickhouse clickhouse-client --query "SELECT 1" &>/dev/null; do sleep 2; done' || {
-        print_error "ClickHouse no respondió en tiempo esperado"
+    print_info "Esperando ClickHouse..."
+    # Diagnóstico: healthcheck, ping HTTP y query simple, con reintentos
+    local ch_deadline=$((SECONDS + 240))
+    local ch_ok=false
+    while [ $SECONDS -lt $ch_deadline ]; do
+        # 1) Verificar health de contenedor
+        if docker compose ps --format 'table {{.Name}}\t{{.State}}' | grep -q '^clickhouse\s\+running$'; then
+            # 2) Verificar ping HTTP
+            if curl -sf http://localhost:8123/ping >/dev/null 2>&1; then
+                # 3) Verificar query nativa
+                if docker compose exec clickhouse clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+                    ch_ok=true
+                    break
+                fi
+            fi
+        fi
+        sleep 2
+    done
+    if [ "$ch_ok" = true ]; then
+        print_success "ClickHouse listo"
+    else
+        print_error "ClickHouse no respondió en tiempo esperado (health/ping/query). Revisa logs: logs/clickhouse_setup.log"
         return 1
-    }
-    print_success "ClickHouse listo"
+    fi
     
-    # Esperar Kafka
-    print_info "⏳ Esperando Kafka..."
-    timeout 120 bash -c 'until docker compose exec kafka kafka-topics --bootstrap-server localhost:9092 --list &>/dev/null; do sleep 2; done' || {
-        print_error "Kafka no respondió en tiempo esperado"
-        return 1
-    }
-    print_success "Kafka listo"
+        # Esperar Kafka (health + operación básica)
+        print_info "Esperando Kafka..."
+        timeout 240 bash -c '
+            cid=$(docker compose ps -q kafka)
+            until [ -n "$cid" ]; do sleep 2; cid=$(docker compose ps -q kafka); done
+            until [ "$(docker inspect -f "{{.State.Health.Status}}" "$cid")" = "healthy" ]; do sleep 2; done
+            # Validar que kafka-topics funciona dentro del contenedor
+            for i in $(seq 1 10); do
+                if docker compose exec -T kafka kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+                    exit 0
+                fi
+                sleep 2
+            done
+            exit 1
+        ' || {
+                print_error "Kafka no respondió en tiempo esperado"
+                return 1
+        }
+        print_success "Kafka listo"
     
     # Esperar Kafka Connect
-    print_info "⏳ Esperando Kafka Connect..."
-    timeout 180 bash -c 'until curl -sf http://localhost:8083/connectors &>/dev/null; do sleep 3; done' || {
+    print_info "Esperando Kafka Connect..."
+    timeout 240 bash -c 'until curl -sf http://localhost:8083/connectors &>/dev/null; do sleep 3; done' || {
         print_error "Kafka Connect no respondió en tiempo esperado"
         return 1
     }
@@ -286,40 +313,60 @@ show_orchestration_status() {
     local interval=10
     
     while [ $elapsed -lt $timeout ]; do
-        # Verificar si el contenedor del orquestador está corriendo
-        if ! docker ps --format "table {{.Names}}" | grep -q "etl-orchestrator"; then
-            break
+        # Obtener estado del contenedor del orquestador (puede no haber arrancado aún)
+        local cid
+        cid=$(docker compose -f "$COMPOSE_FILE" ps -q etl-orchestrator 2>/dev/null || true)
+        local status=""
+        if [ -n "$cid" ]; then
+            status=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || true)
         fi
-        
-        # Mostrar progreso cada minuto
-        if [ $((elapsed % 60)) -eq 0 ] && [ $elapsed -gt 0 ]; then
+
+        # Mostrar progreso cada minuto desde el log detallado, si existe
+        if [ $((elapsed % 60)) -eq 0 ]; then
             local minutes=$((elapsed / 60))
-            print_info "⏳ Orquestación en progreso... (${minutes} minutos)"
-            
-            # Mostrar últimas líneas del log
-            if [ -f "$LOGS_DIR/orchestrator.log" ]; then
+            if [ $elapsed -eq 0 ]; then
+                print_info "⏳ Esperando orquestación (el orquestador arranca cuando Superset está healthy)..."
+            else
+                print_info "⏳ Orquestación en progreso... (${minutes} minutos)"
+            fi
+            if [ -f "$LOGS_DIR/auto_pipeline_detailed.log" ]; then
                 echo -e "${CYAN}📋 Últimas actividades:${NC}"
-                tail -n 3 "$LOGS_DIR/orchestrator.log" | while read line; do
-                    echo "   $line"
-                done
+                tail -n 5 "$LOGS_DIR/auto_pipeline_detailed.log" | sed 's/^/   /'
             fi
         fi
-        
+
+        # Si hay archivo de estado y marca SUCCESS o FAILURE, salimos
+        if [ -f "$LOGS_DIR/auto_pipeline_status.json" ]; then
+            if grep -q '"overall"[[:space:]]*:[[:space:]]*"SUCCESS"' "$LOGS_DIR/auto_pipeline_status.json"; then
+                print_success "🎉 Orquestación completada exitosamente"
+                return 0
+            fi
+            if grep -q '"overall"[[:space:]]*:[[:space:]]*"FAIL' "$LOGS_DIR/auto_pipeline_status.json"; then
+                print_warning "⚠️  Orquestación completada con errores"
+                return 1
+            fi
+        fi
+
+        # Si el contenedor del orquestador ya terminó (exited) y no hay estado, detenemos espera
+        if [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+            break
+        fi
+
         sleep $interval
         elapsed=$((elapsed + interval))
     done
-    
-    # Verificar resultado final
-    if [ -f "$LOGS_DIR/orchestrator.log" ]; then
-        if grep -q "INICIALIZACIÓN EXITOSA" "$LOGS_DIR/orchestrator.log"; then
+
+    # Resultado final por archivos de estado
+    if [ -f "$LOGS_DIR/auto_pipeline_status.json" ]; then
+        if grep -q '"overall"[[:space:]]*:[[:space:]]*"SUCCESS"' "$LOGS_DIR/auto_pipeline_status.json"; then
             print_success "🎉 Orquestación completada exitosamente"
             return 0
-        elif grep -q "INICIALIZACIÓN PARCIAL\|FALLÓ" "$LOGS_DIR/orchestrator.log"; then
-            print_warning "⚠️  Orquestación completada con errores"
+        elif grep -q '"overall"[[:space:]]*:[[:space:]]*"' "$LOGS_DIR/auto_pipeline_status.json"; then
+            print_warning "⚠️  Orquestación completada con advertencias"
             return 1
         fi
     fi
-    
+
     print_warning "⏰ Orquestación en progreso o estado indeterminado"
     return 1
 }
@@ -354,45 +401,60 @@ show_final_status() {
     echo ""
     echo "📋 LOGS DETALLADOS:"
     echo "   📁 Directorio:    $LOGS_DIR"
-    echo "   🎯 Orquestador:   $LOGS_DIR/orchestrator.log"
+    echo "   🎯 Orquestador:   $LOGS_DIR/auto_pipeline_detailed.log"
+    echo "   📈 Estado JSON:   $LOGS_DIR/auto_pipeline_status.json"
     echo ""
     echo "🛠️  COMANDOS ÚTILES:"
     echo "   Ver logs:         docker compose logs -f [servicio]"
     echo "   Estado:           python3 tools/pipeline_status.py"
     echo "   Detener:          docker compose down"
     echo -e "${NC}"
+
+    # Mostrar una pequeña muestra del log del orquestador si existe
+    if [ -f "$LOGS_DIR/auto_pipeline_detailed.log" ]; then
+        print_info "Últimas 10 líneas del orquestador:"
+        tail -n 10 "$LOGS_DIR/auto_pipeline_detailed.log" | sed 's/^/   /'
+    fi
 }
 
 # Función principal
 main() {
     print_header "🚀 INICIANDO PIPELINE ETL AUTOMÁTICO"
-    
-    # 1. Verificar dependencias
+
+    print_header "🧹 FASE 1: LIMPIEZA Y DEPENDENCIAS"
     check_dependencies
-    
-    # 2. Configurar entorno
     ensure_docker_network
     ensure_logs_directory
-    
-    # 3. Limpiar servicios previos si es necesario
     cleanup_previous_services
-    
-    # 4. Levantar servicios
-    start_services
-    
-    # 5. Esperar servicios base
+
+
+    print_header "🏗️  FASE 2: LEVANTANDO SERVICIOS DOCKER"
+    # Levantar servicios, ignorando errores benignos (como imágenes ya existentes)
+    set +e
+    start_services || print_warning "Algunos servicios ya estaban creados o hubo warnings, continuando..."
+    set -e
+    print_info "Estado de los contenedores tras el build:"
+    docker compose ps --format 'table {{.Name}}\t{{.State}}\t{{.Status}}' || print_warning "No se pudo mostrar el estado de los contenedores, continuando..."
+
+    print_header "🔍 FASE 3: ESPERANDO SERVICIOS BASE"
     wait_for_services
-    
-    # 6. Mostrar progreso de orquestación
+
+    print_header "🤖 FASE 4: ORQUESTACIÓN AUTOMÁTICA Y PROGRESO"
     if show_orchestration_status; then
         print_success "🎉 Pipeline ETL iniciado exitosamente"
     else
         print_warning "⚠️  Pipeline ETL iniciado con advertencias"
     fi
-    
-    # 7. Mostrar estado final
+
+    print_header "📊 FASE 5: ESTADO FINAL Y ACCESO"
     show_final_status
-    
+
+    # Ejecutar validación automática del pipeline y mostrar resultado
+    if [ -f "$SCRIPT_DIR/tools/pipeline_status.py" ]; then
+        print_info "Validando estado final del pipeline (datos, vistas, conectores, Superset)..."
+        python3 "$SCRIPT_DIR/tools/pipeline_status.py" || print_warning "No se pudo ejecutar validación automática"
+    fi
+
     print_header "✅ INICIO COMPLETADO"
 }
 

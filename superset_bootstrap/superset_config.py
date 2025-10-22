@@ -38,7 +38,7 @@ CACHE_CONFIG = {
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
 CLICKHOUSE_PORT = int(os.environ.get("CLICKHOUSE_PORT", 8123))
 CLICKHOUSE_DATABASE = os.environ.get("CLICKHOUSE_DATABASE", "fgeo_analytics")
-CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "superset")
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "superset_ro")
 CLICKHOUSE_PASSWORD = os.environ.get("CLICKHOUSE_PASSWORD", "Sup3rS3cret!")
 
 # ClickHouse connection string

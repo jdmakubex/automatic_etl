@@ -19,7 +19,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
-CONNECTORS_PATH = "generated/default"
+# Directorio base donde se generan los conectores. Por defecto 'generated'
+# Antes estaba fijo a 'generated/default', lo que omitía otras conexiones.
+CONNECTORS_PATH = os.getenv("CONNECTORS_PATH", "generated")
 MAX_RETRIES = 30
 RETRY_DELAY = 10
 
@@ -91,6 +93,35 @@ def apply_connector(connector_file):
         print(f"❌ Error procesando {connector_file}: {e}")
         return False
 
+def discover_connector_files(base_path: str) -> list[str]:
+    """Busca archivos de conectores Debezium generados.
+
+    Criterios:
+    - Recursivo bajo base_path
+    - Nombres típicos: connector.json o cualquier *.json con campo 'config'
+    - Excluye archivos de metadatos (discovery_summary.json, tables_metadata.json)
+    """
+    files = []
+    # 1) Preferir archivos explícitos 'connector.json'
+    files.extend(glob.glob(os.path.join(base_path, "**", "connector.json"), recursive=True))
+    # 2) Secundario: cualquier *.json excepto los metadatos comunes
+    for f in glob.glob(os.path.join(base_path, "**", "*.json"), recursive=True):
+        name = os.path.basename(f)
+        if name in ("discovery_summary.json", "tables_metadata.json"):
+            continue
+        if f not in files:
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    js = json.load(fh)
+                if isinstance(js, dict) and ("config" in js or "name" in js):
+                    files.append(f)
+            except Exception:
+                # Ignorar JSON inválidos
+                pass
+    # Orden estable para logs predecibles
+    return sorted(files)
+
+
 def main():
     """Función principal para aplicar conectores automáticamente"""
     print("=== APLICACIÓN AUTOMÁTICA DE CONECTORES DEBEZIUM ===")
@@ -100,12 +131,13 @@ def main():
         log.error("Kafka Connect no está disponible")
         sys.exit(1)
     
-    # Buscar archivos de conectores
-    connector_files = glob.glob(f"{CONNECTORS_PATH}/*.json")
+    # Buscar archivos de conectores (recursivo)
+    base_path = CONNECTORS_PATH
+    connector_files = discover_connector_files(base_path)
     
     if not connector_files:
-        print(f"⚠️  No se encontraron archivos de conectores en {CONNECTORS_PATH}")
-        return
+        print(f"⚠️  No se encontraron archivos de conectores en {base_path}")
+        return  # No es fatal: permite continuar con otras fases
     
     print(f"Encontrados {len(connector_files)} archivos de conectores")
     
