@@ -188,6 +188,16 @@ if [ "$INGESTION_SUCCESS" = true ]; then
         log_message "WARNING" "⚠️ Verificación de Kafka encontró problemas"
     fi
     
+    # Verificación de Redis
+    log_message "INFO" "📋 FASE 2.9: Verificación de Redis (Stack Asíncrono)"
+    echo "🔍 Ejecutando verificación de Redis..."
+    if bash tools/verificaciones/redis_verify.sh 2>&1 | tee -a "$LOG_FILE"; then
+        log_message "SUCCESS" "✅ Verificación de Redis completada"
+        echo "📊 Ver detalles en: logs/redis_verify_latest.log"
+    else
+        log_message "WARNING" "⚠️ Verificación de Redis encontró problemas"
+    fi
+    
     # Configurar Superset datasets automáticamente
     log_message "INFO" "📋 FASE 3: Configuración automática de Superset"
     echo "📊 CONFIGURANDO SUPERSET AUTOMÁTICAMENTE..."

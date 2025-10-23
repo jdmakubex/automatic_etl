@@ -119,6 +119,7 @@ with open('$CONSOLIDATED_JSON', 'w') as f: json.dump(data, f, indent=2)
 VERIFICATIONS=(
     "clickhouse:$VERIFY_DIR/clickhouse_verify.sh:2:5"
     "kafka:$VERIFY_DIR/kafka_verify.sh:1:3"
+    "redis:$VERIFY_DIR/redis_verify.sh:1:3"
     "superset:$VERIFY_DIR/superset_verify.sh:3:10"
 )
 

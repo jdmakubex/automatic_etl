@@ -4,9 +4,16 @@
 
 set -e
 
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+LOG_FILE="/app/logs/async_stack_verify_${TIMESTAMP}.log"
+LATEST_LOG="/app/logs/async_stack_verify_latest.log"
+JSON_REPORT="/app/logs/async_stack_verify_${TIMESTAMP}.json"
+
+mkdir -p /app/logs
+
 echo "🔍 Verificando Stack Asíncrono de Superset"
-echo "=========================================="
-echo ""
+echo "==========================================" | tee "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
 
 # Colores
 GREEN='\033[0;32m'
