@@ -44,6 +44,33 @@ rm -rf generated/*/schemas/*.json 2>/dev/null || true
 rm -rf generated/fiscalizacion generated/archivos generated/mysql generated/information_schema 2>/dev/null || true
 find generated/ -type f -name "*.json" -delete 2>/dev/null || true
 
+# --- RECREAR CARPETAS NECESARIAS (para evitar fallos de mount en Docker/WSL) ---
+echo "🔧 Recreando carpetas necesarias (vacías) para próximos despliegues..."
+# Lista de rutas relativas que deben existir para los bind mounts en docker-compose
+REQUIRED_DIRS=(
+	"generated/default/schemas"
+	"generated/default"
+	"generated"
+	"logs"
+)
+
+for d in "${REQUIRED_DIRS[@]}"; do
+	if [ ! -d "$d" ]; then
+		echo "   - Creando $d"
+		mkdir -p "$d"
+	else
+		echo "   - Existe $d"
+	fi
+	# asegurar un .gitkeep para mantener la estructura en git y evitar que quede vacía
+	if [ ! -f "$d/.gitkeep" ]; then
+		touch "$d/.gitkeep"
+	fi
+done
+
+# Asegurar permisos amplios (útil en WSL/Docker Desktop) para evitar problemas de acceso
+chmod -R 0777 generated logs || true
+
+
 # Verificar estado final
 echo ""
 echo "✅ Limpieza completada"
