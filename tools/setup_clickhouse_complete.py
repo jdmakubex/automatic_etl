@@ -151,6 +151,14 @@ def create_users():
         db_name = os.getenv("CLICKHOUSE_DATABASE", "fgeo_analytics")
 
         if user['name'] == os.getenv('CLICKHOUSE_ETL_USER', 'etl'):
+            # Dar permisos para crear databases (necesario para analytics)
+            query = f"GRANT CREATE DATABASE ON *.* TO {user['name']}"
+            success, result = execute_clickhouse_query(query)
+            if success:
+                logger.info(f"Permiso 'CREATE DATABASE' otorgado a '{user['name']}'")
+            else:
+                logger.warning(f"Permiso 'CREATE DATABASE' para '{user['name']}': {result}")
+            
             for grant in user['grants']:
                 query = f"GRANT {grant} ON {db_name}.* TO {user['name']}"
                 success, result = execute_clickhouse_query(query)

@@ -205,8 +205,8 @@ services:
       - CLICKHOUSE_HTTP_HOST=clickhouse
       - CLICKHOUSE_HTTP_PORT=8123
       - CLICKHOUSE_NATIVE_PORT=9000
-      - CH_USER=etl
-      - CH_PASSWORD=Et1Ingest!
+      - CH_USER=${CLICKHOUSE_DEFAULT_USER:-default}
+      - CH_PASSWORD=${CLICKHOUSE_DEFAULT_PASSWORD:-ClickHouse123!}
       - CH_DB=fgeo_analytics
       - DB_CONNECTIONS=${DB_CONNECTIONS}
     volumes:
