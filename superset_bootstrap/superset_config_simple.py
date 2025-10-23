@@ -89,6 +89,10 @@ FEATURE_FLAGS = {
 SQLLAB_ASYNC_TIME_LIMIT_SEC = 300  # 5 minutos timeout para queries async
 SQLLAB_TIMEOUT = 300  # 5 minutos timeout general
 SUPERSET_WEBSERVER_TIMEOUT = 300
+# IMPORTANTE: Forzar SQL Lab a usar modo async para evitar bug 'dict has no attribute set'
+SQL_MAX_ROW = 10000  # Máximo de filas a retornar
+SQLLAB_DEFAULT_DBID = None  # Usar database por defecto del usuario
+SQLLAB_QUERY_COST_ESTIMATE_TIMEOUT = 10  # Timeout para estimación de costo
 
 # Global Async Queries Configuration
 GLOBAL_ASYNC_QUERIES_REDIS_CONFIG = {
