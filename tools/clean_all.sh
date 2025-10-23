@@ -23,6 +23,7 @@ docker volume rm etl_prod_kafka_data 2>/dev/null || echo "     ✅ kafka_data ya
 docker volume rm etl_prod_connect_data 2>/dev/null || echo "     ✅ connect_data ya eliminado"
 docker volume rm etl_prod_superset_home 2>/dev/null || echo "     ✅ superset_home ya eliminado"
 docker volume rm etl_prod_etl_logs 2>/dev/null || echo "     ✅ etl_logs ya eliminado"
+docker volume rm etl_prod_redis_data 2>/dev/null || echo "     ✅ redis_data ya eliminado"
 
 # Limpiar volúmenes huérfanos
 echo "🗑️  Limpiando volúmenes huérfanos..."

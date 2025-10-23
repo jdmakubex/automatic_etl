@@ -88,6 +88,7 @@ if ! python3 tools/test_clickhouse_auth.py; then
     exit 1
 fi
 wait_for_service "Kafka Connect" "connect" "8083" || exit 1
+wait_for_service "Redis" "redis" "6379" || log_message "WARNING" "⚠️ Redis no está disponible - Superset async podría no funcionar"
 
 # Pequeña pausa adicional para estabilización
 log_message "INFO" "⏳ Esperando estabilización de servicios (15s)..."
