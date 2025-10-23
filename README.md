@@ -211,6 +211,39 @@ docker compose down -v
 - **Recuperación de errores:** Ver `docs/ERROR_RECOVERY.md`
 - **Orden de dependencias:** Ver `docs/DEPENDENCIES.md`
 - **Guía de testing:** Ver `docs/TESTING_GUIDE.md`
+- **Stack Asíncrono (Redis + Celery):** Ver `docs/ASYNC_STACK.md` 🆕
+
+---
+
+## 🎯 Características Especiales
+
+### Stack Asíncrono de Superset 🚀
+
+El sistema incluye un stack completo de consultas asíncronas para SQL Lab:
+
+**Componentes:**
+- **Redis:** Broker de mensajes y cache (5 DBs dedicadas)
+- **Celery Workers:** Ejecución paralela de queries (4 workers por defecto)
+- **Celery Beat:** Scheduler para tareas periódicas
+
+**Beneficios:**
+- ✅ SQL Lab puede ejecutar queries largas sin timeout
+- ✅ Múltiples queries concurrentes sin bloqueo
+- ✅ Cache de resultados para mejor rendimiento
+- ✅ Queries en background con polling automático
+
+**Verificar el stack:**
+```bash
+./tools/verify_async_stack.sh
+```
+
+**Configuración:**
+- `GLOBAL_ASYNC_QUERIES: True` habilitado por defecto
+- `allow_run_async: True` en todas las conexiones ClickHouse
+- Transport: Polling (500ms)
+- Timeout: 5 minutos por query
+
+Ver documentación completa en `docs/ASYNC_STACK.md`
 
 ---
 

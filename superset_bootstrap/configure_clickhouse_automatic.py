@@ -228,7 +228,7 @@ def create_clickhouse_database(session, token):
             "database_name": "ClickHouse ETL Database",
             "sqlalchemy_uri": sqlalchemy_uri,
             "expose_in_sqllab": True,
-            "allow_run_async": False,
+            "allow_run_async": True,
             "allow_dml": False,
             "allow_file_upload": False,
             "extra": json.dumps({

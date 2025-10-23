@@ -46,6 +46,9 @@ RUN pip install --no-cache-dir \
     # Base de datos adicionales
     psycopg2-binary \
     pymysql \
+    # Celery y Redis para async queries
+    celery==5.3.4 \
+    redis==5.0.1 \
     # Herramientas de red Python
     requests[security] \
     urllib3[secure] \

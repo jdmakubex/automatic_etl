@@ -303,7 +303,7 @@ class SupersetAutoConfigurator:
                 "expose_in_sqllab": True,
                 "allow_ctas": True,
                 "allow_cvas": True,
-                "allow_run_async": False,
+                "allow_run_async": True,
                 "allow_dml": False,
                 "extra": json.dumps(extra_config)
             }

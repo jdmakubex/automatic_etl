@@ -20,6 +20,7 @@ volumes:
   connect_data:
   superset_home:
   etl_logs:
+  redis_data:
 
 services:
 # ---------- ETL TOOLS (ingest_runner) ----------
@@ -217,6 +218,23 @@ services:
         condition: service_healthy
     command: ["python3", "tools/setup_clickhouse_complete.py"]
 
+  # ---------- REDIS (Backend para Celery y Cache de Superset) ----------
+  redis:
+    image: redis:7-alpine
+    container_name: superset-redis
+    networks:
+      - etl_net
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # ---------- SUPERSET ----------
   superset:
     build:
@@ -229,6 +247,8 @@ services:
       - SUPERSET_ENV=production
       - SUPERSET_LOAD_EXAMPLES=no
       - SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     volumes:
       - superset_home:/app/superset_home
       - ./superset_bootstrap:/bootstrap:ro
@@ -238,6 +258,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       superset-venv-setup:
         condition: service_completed_successfully
     command: ["superset", "run", "-p", "8088", "--host", "0.0.0.0"]
@@ -246,6 +268,61 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+
+  # ---------- SUPERSET CELERY WORKER (Async Query Execution) ----------
+  superset-worker:
+    build:
+      context: .
+      dockerfile: ./superset.Dockerfile
+    container_name: superset-worker
+    networks:
+      - etl_net
+    environment:
+      - SUPERSET_ENV=production
+      - SUPERSET_LOAD_EXAMPLES=no
+      - SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_bootstrap:/bootstrap:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      superset:
+        condition: service_healthy
+    command: ["celery", "--app=superset.tasks.celery_app:app", "worker", "--pool=prefork", "-O", "fair", "-c", "4"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------- SUPERSET CELERY BEAT (Scheduler para tareas periódicas) ----------
+  superset-beat:
+    build:
+      context: .
+      dockerfile: ./superset.Dockerfile
+    container_name: superset-beat
+    networks:
+      - etl_net
+    environment:
+      - SUPERSET_ENV=production
+      - SUPERSET_LOAD_EXAMPLES=no
+      - SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_bootstrap:/bootstrap:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      superset:
+        condition: service_healthy
+    command: ["celery", "--app=superset.tasks.celery_app:app", "beat", "--pidfile=", "--schedule=/tmp/celerybeat-schedule"]
+    restart: unless-stopped
 
   # ---------- SUPERSET VENV SETUP ----------
   superset-venv-setup:
