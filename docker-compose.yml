@@ -21,6 +21,7 @@ volumes:
   superset_home:
   etl_logs:
   redis_data:
+  generated_data:     # Volumen Docker para todos los archivos generados del pipeline
 
 services:
 # ---------- ETL TOOLS (ingest_runner) ----------
@@ -46,7 +47,7 @@ services:
     volumes:
       - ./tools:/app/tools
       - ./logs:/app/logs
-      - ./generated:/app/generated
+      - generated_data:/app/generated
       - ./superset_bootstrap:/app/superset_bootstrap
       - ./.env:/app/.env:ro
       - /var/run/docker.sock:/var/run/docker.sock  # Acceso al socket Docker
@@ -96,7 +97,7 @@ services:
     volumes:
       - ./tools:/app/tools
       - ./logs:/app/logs
-      - ./generated:/app/generated
+      - generated_data:/app/generated
       - ./bootstrap:/app/bootstrap
       - ./superset_bootstrap:/app/superset_bootstrap
       - /var/run/docker.sock:/var/run/docker.sock  # Acceso directo al socket Docker
@@ -136,7 +137,7 @@ services:
     volumes:
       - ./tools:/app/tools
       - ./logs:/app/logs
-      - ./generated:/app/generated
+      - generated_data:/app/generated
       - /var/run/docker.sock:/var/run/docker.sock  # Acceso directo al socket Docker
     privileged: true
     # Grupo docker dinámico basado en el GID del host
@@ -252,7 +253,7 @@ services:
     volumes:
       - superset_home:/app/superset_home
       - ./superset_bootstrap:/bootstrap:ro
-      - ./generated/default/schemas:/app/generated/default/schemas:ro
+      - generated_data:/app/generated:ro
     ports:
       - "8088:8088"
     depends_on:
@@ -544,7 +545,7 @@ services:
       - etl_net
     volumes:
       - ./tools:/app/tools
-      - ./generated:/app/generated
+      - generated_data:/app/generated
     depends_on:
       connect:
         condition: service_healthy
@@ -604,7 +605,7 @@ services:
       - etl_net
     volumes:
       - ./tools:/app/tools
-      - ./generated:/app/generated
+      - generated_data:/app/generated
       - ./logs:/app/logs
     user: "1000:1000"
     depends_on:
