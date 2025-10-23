@@ -13,7 +13,9 @@ logs/**
 *.log
 !logs/.gitkeep
 
-# Documentation notes - NUNCA subir información de tablas/datos
+# Documentation notes - NUNCA subir información de tablas/datos o notas de desarrollo
+docs/notas_desarrollo/
+docs/old/
 *_NOTES.md
 PROGRESS_NOTES.md
 DEBUG_*.md
@@ -23,6 +25,8 @@ AUTOMATION_*.md
 VERIFY_*.md
 FINAL_*.md
 README_OLD_WITH_SENSITIVE_DATA.md
+README_AUTOMATIZADO.md
+README_PRODUCTION.md
 
 # Python cache
 __pycache__/
