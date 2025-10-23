@@ -18,7 +18,7 @@ Este documento describe la implementación del stack completo de consultas asín
          │
          ▼
 ┌─────────────────┐
-│  Redis Broker   │ ← Cola de mensajes (tasks)
+│  Redis Broker   │ ← Cola de mensajes (tareas)
 └────────┬────────┘
          │
          ▼
@@ -43,22 +43,22 @@ Este documento describe la implementación del stack completo de consultas asín
 - **Puerto**: 6379
 - **Función**: 
   - Broker de mensajes para Celery (DB 0)
-  - Results Backend para queries (DB 1)
+  - Backend de resultados para queries (DB 1)
   - Cache general de Superset (DB 2)
-  - Data cache (DB 3)
-  - Async queries stream (DB 4)
+  - Cache de datos (DB 3)
+  - Stream de queries asíncronas (DB 4)
 - **Persistencia**: Volumen `redis_data` con AOF (Append-Only File)
 
 ### 2. Superset Worker (superset-worker)
 - **Función**: Ejecuta queries SQL de forma asíncrona
 - **Configuración**:
   - Pool: prefork
-  - Concurrency: 4 workers
-  - Fair scheduling (-O fair)
+  - Concurrencia: 4 workers
+  - Planificación justa (-O fair)
 - **Healthcheck**: Celery ping via `celery inspect`
 
 ### 3. Superset Beat (superset-beat)
-- **Función**: Scheduler para tareas periódicas
+- **Función**: Planificador para tareas periódicas
 - **Tareas programadas**:
   - `reports.scheduler`: Cada minuto (generación de reportes)
   - `reports.prune_log`: Diariamente a medianoche (limpieza de logs)
@@ -77,7 +77,7 @@ REDIS_PORT=6379
 SUPERSET_SECRET_KEY=Sup3rS3cr3tK3yF0rPr0duct10nUs3
 ```
 
-### Superset Config (superset_config_simple.py)
+### Configuración de Superset (superset_config_simple.py)
 
 #### Celery
 ```python
@@ -87,7 +87,7 @@ class CeleryConfig:
     imports = ("superset.sql_lab", "superset.tasks", "superset.tasks.scheduler")
 ```
 
-#### Results Backend
+#### Backend de Resultados
 ```python
 RESULTS_BACKEND = {
     "backend": "redis",
@@ -97,15 +97,15 @@ RESULTS_BACKEND = {
 }
 ```
 
-#### Cache Configuration
+#### Configuración de Cache
 ```python
-# General cache
+# Cache general
 CACHE_CONFIG = {
     'CACHE_TYPE': 'RedisCache',
     'CACHE_REDIS_DB': 2,
 }
 
-# Data cache (query results)
+# Cache de datos (resultados de queries)
 DATA_CACHE_CONFIG = {
     'CACHE_TYPE': 'RedisCache',
     'CACHE_REDIS_DB': 3,
@@ -113,7 +113,7 @@ DATA_CACHE_CONFIG = {
 }
 ```
 
-#### Global Async Queries
+#### Queries Asíncronas Globales
 ```python
 FEATURE_FLAGS = {
     "GLOBAL_ASYNC_QUERIES": True,
@@ -129,7 +129,7 @@ GLOBAL_ASYNC_QUERIES_TRANSPORT = "polling"
 GLOBAL_ASYNC_QUERIES_POLLING_DELAY = 500  # ms
 ```
 
-#### SQL Lab Timeouts
+#### Timeouts de SQL Lab
 ```python
 SQLLAB_ASYNC_TIME_LIMIT_SEC = 300  # 5 minutos
 SQLLAB_TIMEOUT = 300
@@ -145,8 +145,8 @@ SUPERSET_WEBSERVER_TIMEOUT = 300
 4. Click en "Run" → La query se ejecuta de forma asíncrona
 5. El UI hace polling cada 500ms hasta obtener resultados
 
-### Explore/Charts
-- Las consultas de dashboards y charts también usan async si están habilitadas
+### Explore/Gráficas
+- Las consultas de dashboards y gráficas también usan async si están habilitadas
 - `allow_run_async: True` en la configuración de la BD
 
 ## 🔍 Monitoreo
@@ -178,7 +178,7 @@ INFO
 SELECT 0
 KEYS *
 
-# Ver claves en DB 1 (results)
+# Ver claves en DB 1 (resultados)
 SELECT 1
 KEYS *
 
@@ -188,13 +188,13 @@ MONITOR
 
 ### Logs
 ```bash
-# Superset server
+# Servidor Superset
 docker logs -f superset
 
 # Worker
 docker logs -f superset-worker
 
-# Beat (scheduler)
+# Beat (planificador)
 docker logs -f superset-beat
 
 # Redis
@@ -222,7 +222,7 @@ O escalar horizontalmente:
 docker-compose up -d --scale superset-worker=3
 ```
 
-## 🛠️ Troubleshooting
+## 🛠️ Solución de Problemas
 
 ### Worker no procesa queries
 ```bash
@@ -232,7 +232,7 @@ docker ps | grep superset-worker
 # Ver logs
 docker logs superset-worker
 
-# Restart worker
+# Reiniciar worker
 docker restart superset-worker
 ```
 
@@ -244,25 +244,25 @@ docker inspect superset-redis | grep -A 10 Health
 # Ping Redis
 docker exec superset-redis redis-cli ping
 
-# Restart Redis
+# Reiniciar Redis
 docker restart superset-redis
 ```
 
 ### Queries se quedan "Running"
-1. Verificar worker logs para errores
+1. Verificar logs del worker para errores
 2. Verificar conexión ClickHouse
-3. Revisar timeout settings (puede ser query muy lenta)
+3. Revisar configuración de timeout (puede ser query muy lenta)
 4. Cancelar query en SQL Lab
 
 ### Limpiar cache
 ```bash
-# Flush todas las DBs de Redis
+# Vaciar todas las DBs de Redis
 docker exec superset-redis redis-cli FLUSHALL
 
 # Solo cache (DB 2)
 docker exec superset-redis redis-cli -n 2 FLUSHDB
 
-# Solo results (DB 1)
+# Solo resultados (DB 1)
 docker exec superset-redis redis-cli -n 1 FLUSHDB
 ```
 
@@ -274,12 +274,12 @@ docker exec superset-redis redis-cli -n 1 FLUSHDB
 - Persistencia en volumen Docker (no en filesystem del host)
 
 ### Celery
-- No autenticación (red interna trusted)
+- Sin autenticación (red interna confiable)
 - SECRET_KEY compartida entre todos los servicios Superset
 
 ## 📈 Próximos Pasos
 
-### Opcional: Flower (Celery Monitoring UI)
+### Opcional: Flower (UI de Monitoreo de Celery)
 Agregar al `docker-compose.yml`:
 ```yaml
 superset-flower:
@@ -334,5 +334,6 @@ Buscar `(healthy)` en:
 ## 📚 Referencias
 
 - [Superset Async Queries](https://superset.apache.org/docs/configuration/async-queries-celery/)
-- [Celery Documentation](https://docs.celeryproject.org/)
-- [Redis Documentation](https://redis.io/documentation)
+- [Documentación de Celery](https://docs.celeryproject.org/)
+- [Documentación de Redis](https://redis.io/documentation)
+
