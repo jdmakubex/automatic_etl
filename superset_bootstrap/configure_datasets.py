@@ -480,6 +480,61 @@ def set_dataset_default_time_grain_none(url, token_ref, username, password, data
         print(f"⚠️  Error configurando default Time Grain None en dataset {dataset_id}: {e}")
         return False
 
+def ensure_count_metric(url, token_ref, username, password, dataset_id):
+    """Asegura que el dataset tenga una métrica COUNT(*) predeterminada.
+    
+    Esto previene errores de GROUP BY al crear visualizaciones porque proporciona
+    una métrica válida que el usuario puede seleccionar fácilmente.
+    """
+    headers = {"Content-Type": "application/json"}
+    try:
+        # Leer metrics actuales del dataset
+        resp = authed_request(url, "GET", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️  No se pudo leer dataset {dataset_id} para añadir métrica COUNT: {resp.status_code}")
+            return False
+        
+        result = resp.json().get('result', {})
+        dataset_name = result.get('table_name', 'unknown')
+        metrics = result.get('metrics') or []
+        
+        # Verificar si ya existe una métrica de conteo
+        has_count = any(
+            m.get('metric_name') == 'count' or 
+            m.get('expression') == 'count(*)' or
+            'count(*)' in str(m.get('expression', '')).lower()
+            for m in metrics
+        )
+        
+        if has_count:
+            print(f"ℹ️  Dataset {dataset_name} ya tiene métrica de conteo")
+            return True
+        
+        # Crear métrica COUNT(*)
+        metric_payload = {
+            "expression": "count(*)",
+            "metric_name": "count",
+            "metric_type": "count",
+            "verbose_name": "COUNT(*)",
+            "description": "Conteo total de registros"
+        }
+        
+        create_resp = authed_request(
+            url, "POST", f"/api/v1/dataset/{dataset_id}/metric", 
+            token_ref, username, password, json=metric_payload, headers=headers, timeout=10
+        )
+        
+        if create_resp.status_code in [200, 201]:
+            print(f"📊 Métrica COUNT(*) creada para dataset {dataset_name}")
+            return True
+        else:
+            print(f"⚠️  No se pudo crear métrica COUNT en {dataset_name}: {create_resp.status_code} - {create_resp.text[:200]}")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️  Error creando métrica COUNT para dataset {dataset_id}: {e}")
+        return False
+
 def get_user_id_by_username(url, token_ref, username, password, target_username):
     """Obtiene el ID de usuario por username, probando rutas compatibles según versión.
     Si el username destino coincide con el usuario autenticado actual, usa /api/v1/me para resolver el ID.
@@ -693,7 +748,8 @@ def get_user_id_by_name_cached(url, token_ref, username, password, cache: dict, 
     uid = get_user_id_by_username(url, token_ref, username, password, target_username)
     cache['users'][target_username] = uid
     return uid
-    def assign_admin_owner_to_all_charts(url, token_ref, username, password, admin_username):
+
+def assign_admin_owner_to_all_charts(url, token_ref, username, password, admin_username):
         """Asigna al usuario admin como owner de todos los charts existentes.
 
         Esto ayuda a evitar escenarios en los que el selector de tipo de visualización aparezca bloqueado
@@ -870,6 +926,8 @@ def main():
             if ds_id:
                 print(f"🔧 Configurando columnas DateTime para dataset {table_name} (ID: {ds_id})...")
                 mark_datetime_columns(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id)
+                # Asegurar métrica COUNT(*) para evitar errores de GROUP BY
+                ensure_count_metric(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id)
                 # Asegurar que el admin sea owner del dataset para permitir edición completa
                 ensure_dataset_owner(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id, SUPERSET_ADMIN)
                 
