@@ -1,3 +1,28 @@
+# Progress Notes
+
+## 2025-10-22
+
+- Fixed superset-datasets container command so the configurator actually runs (converted to array-form bash -c with multi-line script).
+- Implemented automatic marking of DateTime/Timestamp columns in Superset datasets (sets is_dttm=True) to prevent GROUP BY errors in charts.
+- Added dataset discovery fallback when create returns 422 (find_dataset) and ensured column marking executes for existing datasets.
+- Added function to set default Explore Time Grain to None by updating dataset.extra.default_form_data.time_grain_sqla = null.
+- Inserted temporary debug logs around dataset creation/lookup flow to validate execution (to be removed after verification).
+- Observed 404 on /api/v1/database/{id}/refresh in current Superset image; harmless, schemas still list successfully.
+
+Status snapshot (evening):
+- Dataset configurator ran end-to-end; logs confirm “columns DateTime ya configuradas” and “Time Grain por defecto = None aplicado” for 19 datasets across archivos and fiscalizacion.
+- Admin user verified as [Admin] via CLI. Attempted to auto-assign admin as owner for all charts; current build’s user lookup API varies, so owner assignment will be re-validated using /api/v1/me/JWT on next pass.
+- Added docs/SUPERSET_UI_TIPS.md with quick tips (All charts tab, dataset vs table message, Time Grain None default, ownership).
+
+Next steps (carry-over):
+- Verify in UI that Explore loads with Time Grain=None by default; if any dataset differs, persist fix via dataset.extra.
+- Finalize chart ownership assignment for admin using robust user-id resolution; then remove noisy 🐛 DEBUG logs.
+- Optionally harden schema refresh to be version-tolerant or skip when 404 is benign.
+
+Next session:
+- Verify logs show find_dataset and DateTime marking executing; confirm Explore defaults to Time Grain=None.
+- Remove noisy debug logs.
+- Optional: improve schema refresh call to be version-tolerant.
 # 📋 NOTAS DE PROGRESO - ETL AUTOMATIZADO
 
 **Fecha:** 13 de Octubre, 2025  

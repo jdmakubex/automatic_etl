@@ -1,5 +1,30 @@
 # Registro de Cambios - Sistema de Robustez y Automatización
 
+## 2025-10-22
+
+### Cambios Implementados
+
+#### 1. Robustez de Autenticación (configure_datasets.py)
+
+**Ubicación**: `superset_bootstrap/configure_datasets.py`
+
+**Cambios realizados**:
+
+- Superset datasets bootstrap now reliably runs via corrected docker-compose command (array form and multi-line bash script).
+- Automatic dataset column configuration: mark DateTime/Timestamp columns as temporal (is_dttm=True) to avoid GROUP BY errors.
+- For existing datasets (422 on create), we now look them up and apply the same configuration.
+- Default Explore Time Grain is set to None by writing default_form_data.time_grain_sqla = null to dataset.extra.
+
+#### 2. Dependencias en Docker Compose
+
+**Ubicación**: `docker-compose.yml`
+
+**Cambio**:
+
+- The /api/v1/database/{id}/refresh endpoint returns 404 on current Superset build; behavior is tolerated and does not block table listing.
+- Temporary debug logs were added to verify the execution flow; they will be removed after validation.
+
+
 ## Fecha: 2025-10-22
 
 ### Problema Principal Identificado

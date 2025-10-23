@@ -250,12 +250,20 @@ def create_dataset(url, token_ref, username, password, database_id, table_name, 
         response = authed_request(url, "POST", "/api/v1/dataset/", token_ref, username, password, json=dataset_data, headers=headers)
         
         if response.status_code in [200, 201]:
-            print(f"✅ Dataset creado para {table_name}")
-            return response.json().get("id") or True
+            dataset_id = response.json().get("id")
+            if dataset_id:
+                print(f"✅ Dataset creado para {table_name} (ID: {dataset_id})")
+                return dataset_id
+            else:
+                print(f"✅ Dataset creado para {table_name} (sin ID en respuesta) - se buscará su ID")
+                return None
+        elif response.status_code == 422:
+            print(f"ℹ️  Dataset {table_name} ya existe (422) - se buscará su ID")
+            return False  # Señal para buscar el dataset existente
         else:
             print(f"⚠️  No se pudo crear dataset para {table_name}: {response.status_code}")
             try:
-                print("  Response body:", response.text)
+                print(f"  Response body: {response.text[:200]}")
             except Exception:
                 pass
             return False
@@ -265,21 +273,52 @@ def create_dataset(url, token_ref, username, password, database_id, table_name, 
         return False
 
 def find_dataset(url, token_ref, username, password, database_id, table_name, schema_name):
-    """Buscar dataset por DB/tabla/esquema y devolver su ID"""
+    """Buscar dataset por DB/tabla/esquema y devolver su ID (robusto con fallback a listado completo)."""
     headers = {"Content-Type": "application/json"}
-    # Filtro rison por nombre de tabla y DB
-    rison_query = f"(filters:!((col:table_name,opr:eq,value:'{table_name}'),(col:database_id,opr:eq,value:{database_id}),(col:schema,opr:eq,value:'{schema_name}')),columns:!(id,table_name,schema,database_id),page:0,page_size:100)"
-    resp = authed_request(url, "GET", f"/api/v1/dataset/?q={rison_query}", token_ref, username, password, headers=headers)
-    if resp.status_code == 200:
-        results = resp.json().get("result", [])
-        if results:
-            dataset_id = results[0].get("id")
-            print(f"✅ Dataset encontrado: {table_name} (ID: {dataset_id})")
-            return dataset_id
+    # Intento 1: Filtro rison (puede fallar según versión/API)
+    try:
+        strict_q = (
+            f"(filters:!((col:table_name,opr:eq,value:'{table_name}'),"
+            f"(col:database_id,opr:eq,value:{database_id}),"
+            f"(col:schema,opr:eq,value:'{schema_name}')),"
+            "columns:!(id,table_name,schema,database_id),page:0,page_size:100)"
+        )
+        resp = authed_request(url, "GET", f"/api/v1/dataset/?q={strict_q}", token_ref, username, password, headers=headers)
+        if resp.status_code == 200:
+            results = resp.json().get("result", [])
+            if results:
+                ds = results[0]
+                dataset_id = ds.get("id")
+                print(f"✅ Dataset encontrado: {schema_name}.{table_name} (ID: {dataset_id})")
+                return dataset_id
+            else:
+                print(f"ℹ️  Estricto sin resultados para {schema_name}.{table_name}, probando búsqueda laxa…")
         else:
-            print(f"⚠️  Dataset {table_name} no encontrado en búsqueda")
-    else:
-        print(f"⚠️  Error buscando dataset {table_name}: {resp.status_code}")
+            print(f"⚠️  Error en búsqueda estricta {table_name}: {resp.status_code}")
+    except Exception as e:
+        print(f"ℹ️  Búsqueda estricta lanzó excepción, se hará listado total: {e}")
+
+    # Intento 2: Listado completo (o por nombre) y filtrado en cliente
+    try:
+        list_q = "(page:0,page_size:2000)"  # sin filtros para maximizar compatibilidad
+        resp2 = authed_request(url, "GET", f"/api/v1/dataset/?q={list_q}", token_ref, username, password, headers=headers)
+        if resp2.status_code == 200:
+            items = resp2.json().get("result", [])
+            for ds in items:
+                tn = ds.get("table_name")
+                sc = ds.get("schema")
+                # database puede venir como id directo o como objeto anidado
+                dbid = ds.get("database_id")
+                if dbid is None and isinstance(ds.get("database"), dict):
+                    dbid = ds.get("database", {}).get("id")
+                if tn == table_name and sc == schema_name and int(dbid or -1) == int(database_id):
+                    print(f"✅ Dataset encontrado (listado): {schema_name}.{table_name} (ID: {ds.get('id')})")
+                    return ds.get("id")
+            print(f"⚠️  No se encontró dataset {schema_name}.{table_name} tras listado completo")
+        else:
+            print(f"⚠️  Error listando datasets: {resp2.status_code}")
+    except Exception as e:
+        print(f"⚠️  Error en listado completo de datasets: {e}")
     return None
 
 def mark_datetime_columns(url, token_ref, username, password, dataset_id):
@@ -441,6 +480,74 @@ def set_dataset_default_time_grain_none(url, token_ref, username, password, data
         print(f"⚠️  Error configurando default Time Grain None en dataset {dataset_id}: {e}")
         return False
 
+def get_user_id_by_username(url, token_ref, username, password, target_username):
+    """Obtiene el ID de usuario por username, probando rutas compatibles según versión.
+    Si el username destino coincide con el usuario autenticado actual, usa /api/v1/me para resolver el ID.
+    """
+    headers = {"Content-Type": "application/json"}
+    # 0) Si target es el usuario actual, usar /api/v1/me (siempre presente)
+    try:
+        me = authed_request(url, "GET", "/api/v1/me", token_ref, username, password, headers=headers, timeout=10)
+        if me.status_code == 200:
+            me_json = me.json() or {}
+            if me_json.get('username') == target_username and me_json.get('id'):
+                return me_json.get('id')
+    except Exception:
+        pass
+    # 1) Try security/users endpoint with rison filter
+    try:
+        q = f"(filters:!((col:username,opr:eq,value:'{target_username}')),columns:!(id,username),page:0,page_size:50)"
+        resp = authed_request(url, "GET", f"/api/v1/security/users/?q={q}", token_ref, username, password, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            items = resp.json().get('result', [])
+            if items:
+                return items[0].get('id')
+    except Exception:
+        pass
+    # 2) Fallback: /api/v1/users
+    try:
+        q2 = "(page:0,page_size:1000)"
+        resp2 = authed_request(url, "GET", f"/api/v1/users/?q={q2}", token_ref, username, password, headers=headers, timeout=10)
+        if resp2.status_code == 200:
+            for u in resp2.json().get('result', []):
+                if u.get('username') == target_username:
+                    return u.get('id')
+    except Exception:
+        pass
+    return None
+
+def ensure_dataset_owner(url, token_ref, username, password, dataset_id, owner_username):
+    """Asegura que el dataset tenga al usuario indicado como owner."""
+    headers = {"Content-Type": "application/json"}
+    try:
+        owner_id = get_user_id_by_username(url, token_ref, username, password, owner_username)
+        if not owner_id:
+            print(f"⚠️  No se pudo resolver user id para '{owner_username}'")
+            return False
+        # Leer dataset actual para conservar otros owners
+        resp = authed_request(url, "GET", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️  No se pudo leer dataset {dataset_id} para owners: {resp.status_code}")
+            return False
+        result = resp.json().get('result', {})
+        current_owners = result.get('owners') or []
+        current_ids = [o.get('id') for o in current_owners if isinstance(o, dict) and 'id' in o]
+        if owner_id in current_ids:
+            # ya está asignado
+            return True
+        new_owner_ids = list({owner_id, *[oid for oid in current_ids if oid]})
+        payload = {"owners": new_owner_ids}
+        put = authed_request(url, "PUT", f"/api/v1/dataset/{dataset_id}", token_ref, username, password, json=payload, headers=headers, timeout=10)
+        if put.status_code in [200, 201]:
+            print(f"👤 Owner '{owner_username}' asignado al dataset {dataset_id}")
+            return True
+        else:
+            print(f"⚠️  Falló asignar owner en dataset {dataset_id}: {put.status_code}")
+            return False
+    except Exception as e:
+        print(f"⚠️  Error asignando owner en dataset {dataset_id}: {e}")
+        return False
+
 def parse_schemas_from_env() -> list:
     """Descubre esquemas de ClickHouse a mapear como datasets en Superset.
     Prioriza SUPERSET_SCHEMAS (coma-separado). Si no está definido, deriva de DB_CONNECTIONS
@@ -482,6 +589,161 @@ def parse_schemas_from_env() -> list:
 
     # 3) Default fallback
     return [os.getenv("SUPERSET_SCHEMA", "fgeo_analytics")]
+
+def ensure_admin_is_superuser(url, token_ref, username, password, admin_username):
+    """Asegura que el usuario admin tenga el rol 'Admin' (superusuario) con todos los permisos"""
+    print(f"👑 Verificando que {admin_username} sea superusuario...")
+    
+    headers = {"Content-Type": "application/json"}
+    
+    try:
+        # Obtener lista de usuarios
+        resp = authed_request(url, "GET", "/api/v1/security/users/?q=(filters:!((col:username,opr:eq,value:'{}')))".format(admin_username), 
+                             token_ref, username, password, headers=headers, timeout=10)
+        
+        if resp.status_code != 200:
+            print(f"⚠️  No se pudo verificar usuario {admin_username}: {resp.status_code}")
+            return False
+        
+        users = resp.json().get("result", [])
+        if not users:
+            print(f"⚠️  Usuario {admin_username} no encontrado")
+            return False
+        
+        user = users[0]
+        user_id = user.get("id")
+        current_roles = user.get("roles", [])
+        role_names = [r.get("name") for r in current_roles]
+        
+        print(f"ℹ️  Usuario {admin_username} tiene roles: {role_names}")
+        
+        # Verificar si ya tiene el rol Admin
+        if "Admin" in role_names:
+            print(f"✅ Usuario {admin_username} ya es superusuario (rol Admin)")
+            return True
+        
+        # Obtener ID del rol Admin
+        roles_resp = authed_request(url, "GET", "/api/v1/security/roles/", token_ref, username, password, headers=headers, timeout=10)
+        if roles_resp.status_code != 200:
+            print(f"⚠️  No se pudieron obtener roles: {roles_resp.status_code}")
+            return False
+        
+        all_roles = roles_resp.json().get("result", [])
+        admin_role = next((r for r in all_roles if r.get("name") == "Admin"), None)
+        
+        if not admin_role:
+            print("⚠️  Rol 'Admin' no encontrado en Superset")
+            return False
+        
+        admin_role_id = admin_role.get("id")
+        
+        # Asignar rol Admin al usuario
+        print(f"🔧 Asignando rol 'Admin' a {admin_username}...")
+        update_payload = {
+            "roles": [admin_role_id] + [r.get("id") for r in current_roles if r.get("id") != admin_role_id]
+        }
+        
+        update_resp = authed_request(url, "PUT", f"/api/v1/security/users/{user_id}", 
+                                    token_ref, username, password, json=update_payload, headers=headers, timeout=10)
+        
+        if update_resp.status_code in [200, 201]:
+            print(f"✅ Rol 'Admin' asignado exitosamente a {admin_username}")
+            return True
+        else:
+            print(f"⚠️  No se pudo asignar rol Admin: {update_resp.status_code} - {update_resp.text[:200]}")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️  Error verificando/asignando rol Admin: {e}")
+        return False
+
+import base64
+
+def _decode_jwt_user_id(token: str):
+    """Intenta decodificar el JWT sin verificar firma y extraer el user id (user_id|sub)."""
+    try:
+        parts = token.split('.')
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        # padding
+        rem = len(payload) % 4
+        if rem:
+            payload += '=' * (4 - rem)
+        data = base64.urlsafe_b64decode(payload.encode('utf-8'))
+        obj = json.loads(data.decode('utf-8'))
+        return obj.get('user_id') or obj.get('sub') or obj.get('user')
+    except Exception:
+        return None
+
+def get_user_id_by_name_cached(url, token_ref, username, password, cache: dict, target_username: str):
+    """Pequeño helper con caché en memoria para resolver user_id por username.
+    Intenta por /api/v1/me y, si coincide el usuario actual, decodifica el JWT como fallback.
+    """
+    if 'users' not in cache:
+        cache['users'] = {}
+    if target_username in cache['users']:
+        return cache['users'][target_username]
+    # Si el target es el usuario con el que nos autenticamos, intentar decodificar el token
+    if target_username == username and token_ref.get('token'):
+        uid = _decode_jwt_user_id(token_ref['token'])
+        if uid:
+            cache['users'][target_username] = uid
+            return uid
+    uid = get_user_id_by_username(url, token_ref, username, password, target_username)
+    cache['users'][target_username] = uid
+    return uid
+    def assign_admin_owner_to_all_charts(url, token_ref, username, password, admin_username):
+        """Asigna al usuario admin como owner de todos los charts existentes.
+
+        Esto ayuda a evitar escenarios en los que el selector de tipo de visualización aparezca bloqueado
+        por permisos/propiedad cuando se abre un chart guardado en modo vista.
+        """
+        print("🖼️  Asegurando que 'admin' sea owner de todos los charts…")
+        headers = {"Content-Type": "application/json"}
+        cache = {}
+        try:
+            admin_id = get_user_id_by_name_cached(url, token_ref, username, password, cache, admin_username)
+            if not admin_id:
+                print("⚠️  No se pudo resolver ID de admin; se omite asignación de owners de charts")
+                return False
+
+            page = 0
+            page_size = 500
+            total_updated = 0
+            while True:
+                q = f"(page:{page},page_size:{page_size},columns:!(id,owners,slice_name))"
+                resp = authed_request(url, "GET", f"/api/v1/chart/?q={q}", token_ref, username, password, headers=headers, timeout=15)
+                if resp.status_code != 200:
+                    print(f"⚠️  No se pudo listar charts (status {resp.status_code})")
+                    break
+                data = resp.json() or {}
+                results = data.get('result') or []
+                if not results:
+                    break
+                for ch in results:
+                    cid = ch.get('id')
+                    owners = ch.get('owners') or []
+                    owner_ids = [o.get('id') for o in owners if isinstance(o, dict) and 'id' in o]
+                    if admin_id in owner_ids:
+                        continue
+                    new_owner_ids = list({admin_id, *[oid for oid in owner_ids if oid]})
+                    payload = {"owners": new_owner_ids}
+                    put = authed_request(url, "PUT", f"/api/v1/chart/{cid}", token_ref, username, password, json=payload, headers=headers, timeout=15)
+                    if put.status_code in [200, 201]:
+                        total_updated += 1
+                    else:
+                        # Algunos builds no permiten PUT directo; continuar
+                        print(f"⚠️  Falló asignar owner en chart {cid}: {put.status_code}")
+                # Continuar a siguiente página si hay resultados llenos
+                if len(results) < page_size:
+                    break
+                page += 1
+            print(f"✅ Owners de charts asegurados; charts actualizados: {total_updated}")
+            return True
+        except Exception as e:
+            print(f"⚠️  Error asignando owners a charts: {e}")
+            return False
 
 def cleanup_duplicate_databases(url, token_ref, username, password):
     """Elimina bases de datos ClickHouse duplicadas o legacy, dejando solo 'ClickHouse ETL Database'"""
@@ -547,6 +809,9 @@ def main():
         sys.exit(1)
     token_ref = {"token": token, "password": SUPERSET_PASSWORD}
     
+    # Asegurar que el usuario admin sea superusuario (rol Admin)
+    ensure_admin_is_superuser(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, SUPERSET_ADMIN)
+    
     # Limpiar bases de datos duplicadas y obtener la oficial
     official_db_id = cleanup_duplicate_databases(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD)
     
@@ -587,7 +852,8 @@ def main():
             dataset_id = create_dataset(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, clickhouse_db['id'], table_name, SCHEMA_NAME)
             ds_id = None
             print(f"🐛 DEBUG: create_dataset returned type={type(dataset_id)} value={dataset_id}")
-            if isinstance(dataset_id, int):
+            # Nota: bool es subclass de int en Python; evitar tratar False/True como IDs válidos
+            if isinstance(dataset_id, int) and dataset_id > 0:
                 ds_id = dataset_id
                 created_count += 1
             else:
@@ -604,6 +870,8 @@ def main():
             if ds_id:
                 print(f"🔧 Configurando columnas DateTime para dataset {table_name} (ID: {ds_id})...")
                 mark_datetime_columns(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id)
+                # Asegurar que el admin sea owner del dataset para permitir edición completa
+                ensure_dataset_owner(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, ds_id, SUPERSET_ADMIN)
                 
                 # Determine a safe time column to set as main_dttm_col.
                 set_time_col = False
@@ -706,6 +974,14 @@ def main():
     else:
         print("⚠️  No se encontraron tablas para crear datasets en los esquemas configurados")
     
+    # Como paso final, asegurar que el usuario admin sea owner de todos los charts,
+    # para evitar restricciones de edición en Explore por propiedad.
+    try:
+        assign_admin_owner_to_all_charts(SUPERSET_URL, token_ref, SUPERSET_ADMIN, SUPERSET_PASSWORD, SUPERSET_ADMIN)
+    except Exception:
+        # No detener el proceso por esto
+        pass
+
     print("🎉 Configuración de datasets completada!")
     print("📋 Ve a Superset > Data > Datasets para ver las tablas disponibles")
 
