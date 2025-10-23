@@ -48,7 +48,7 @@ RUN pip install --no-cache-dir \
     pymysql \
     # Celery y Redis para async queries
     celery==5.3.4 \
-    redis==5.0.1 \
+    redis==4.6.0 \
     # Herramientas de red Python
     requests[security] \
     urllib3[secure] \
@@ -59,6 +59,13 @@ RUN pip install --no-cache-dir \
     # Seguridad y HTTPS (versión compatible con Superset)
     "cryptography>=41.0.2,<41.1.0" \
     pyOpenSSL
+
+# Alinear versiones de SQLAlchemy/Alembic con Superset 3.1 (evita ImportError _BindParamClause)
+# Nota: algunas instalaciones previas pueden haber subido SQLAlchemy a 2.x; forzamos 1.4.x compatible
+RUN pip install --no-cache-dir \
+    "SQLAlchemy>=1.4,<2.0" \
+    "alembic>=1.8,<2.0" \
+    "Flask-Migrate>=3.0,<4.0"
 
 # Configurar variables de entorno para HTTPS y comunicación
 ENV PYTHONHTTPSVERIFY=1

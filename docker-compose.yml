@@ -396,18 +396,13 @@ services:
       - CLICKHOUSE_USER=superset_ro
       - CLICKHOUSE_PASSWORD=Sup3rS3cret!
       - DB_CONNECTIONS=${DB_CONNECTIONS}
-    command: 
+    command:
       - bash
-      - -c
-      - |
-        set -e
-        echo "🔧 Instalando dependencias..."
-        pip install requests
-        echo "📊 Configurando datasets en Superset..."
-        python /bootstrap/configure_datasets.py
-        echo "✅ Configure_datasets.py completado"
+      - -lc
+      - /bootstrap/run_post_config.sh
     networks:
       - etl_net
+
 
   # ---------- MULTI-DATABASE AUDITOR ----------
   multi-db-auditor:

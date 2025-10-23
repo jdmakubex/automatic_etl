@@ -13,4 +13,4 @@ python /bootstrap/configure_datasets.py
 echo "⚡ Enabling SQL Lab Run Async by default"
 python /bootstrap/enable_sql_lab_async.py || echo "⚠️ Could not enforce Run Async via API; will rely on GLOBAL_ASYNC_QUERIES and UI local setting"
 
-echo "✅ Post-config complete"}  !***  }```
+echo "✅ Post-config complete"
