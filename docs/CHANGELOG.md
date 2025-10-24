@@ -28,8 +28,39 @@ Archivos de reporte generados:
 
 ### Próximos Pasos
 
-1. Ajustar el endpoint/API para establecer “Run Async” por defecto a nivel usuario (Superset 3.1).
+1. Ajustar el endpoint/API para establecer "Run Async" por defecto a nivel usuario (Superset 3.1).
 2. Validar en UI: creación de gráficas por admin y ausencia de errores con columnas fecha.
+
+#### 3. Validación automatizada de Superset UI
+
+Ubicación: `tools/validate_superset_ui.py`
+
+- Script de validación automatizada que verifica:
+  - Autenticación admin funcional
+  - Base de datos ClickHouse conectada y configurada
+  - 19 datasets creados y accesibles
+  - Columnas temporales detectadas en datasets relevantes
+  - Permisos de admin para crear charts
+  - SQL Lab con async habilitado globalmente
+
+Resultado: ✅ Todas las validaciones automatizadas pasaron.
+
+**Estado del sistema**: Listo para validación manual en UI.
+
+Documentación creada:
+- `docs/VALIDATION_CHECKLIST.md`: Checklist completo de validación manual con pasos detallados para verificar creación de charts, SQL Lab async, y manejo de columnas fecha.
+
+Reporte generado:
+- `logs/superset_ui_validation.json`: Resultados completos de validación automatizada.
+
+### Pendientes
+
+1. **Validación Manual UI** (15-20 min):
+   - Crear charts con columnas de fecha
+   - Verificar SQL Lab ejecuta en modo async
+   - Confirmar ausencia de errores GROUP BY
+
+2. **Ajuste opcional**: Forzar "Run Async" por defecto a nivel usuario vía API (el endpoint /api/v1/me/ retorna 401; la funcionalidad async está disponible pero el toggle no se marca automáticamente).
 
 ## 2025-10-22
 
