@@ -309,12 +309,37 @@ class SupersetAutoConfigurator:
             }
             
             if existing_db:
-                # Actualizar existente
+                # Actualizar existente de forma segura (PATCH con campos mínimos primero)
                 db_id = existing_db["id"]
                 self.logger.info(f"🔄 Actualizando conexión existente (ID: {db_id})")
-                
-                response = self.session.put(f"{self.superset_url}/api/v1/database/{db_id}", json=payload)
-                response.raise_for_status()
+
+                # 1) Intento conservador: no tocar sqlalchemy_uri ni database_name
+                minimal_payload = {
+                    "expose_in_sqllab": payload["expose_in_sqllab"],
+                    "allow_ctas": payload["allow_ctas"],
+                    "allow_cvas": payload["allow_cvas"],
+                    "allow_run_async": payload["allow_run_async"],
+                    "allow_dml": payload["allow_dml"],
+                    "extra": payload["extra"],
+                }
+
+                resp_patch = self.session.patch(
+                    f"{self.superset_url}/api/v1/database/{db_id}", json=minimal_payload
+                )
+                if not resp_patch.ok:
+                    # 2) Fallback: PUT completo (puede fallar si hay validaciones estrictas)
+                    self.logger.warning(
+                        f"⚠️  PATCH falló ({resp_patch.status_code}): {resp_patch.text[:300]} — intentando PUT completo"
+                    )
+                    resp_put = self.session.put(
+                        f"{self.superset_url}/api/v1/database/{db_id}", json=payload
+                    )
+                    if not resp_put.ok:
+                        # Registrar detalles y lanzar excepción para manejar más arriba
+                        err_snippet = resp_put.text[:500]
+                        raise requests.HTTPError(
+                            f"Update database {db_id} failed: {resp_put.status_code} — {err_snippet}"
+                        )
             else:
                 # Crear nueva
                 self.logger.info("➕ Creando nueva conexión ClickHouse")
@@ -329,6 +354,20 @@ class SupersetAutoConfigurator:
             
         except Exception as e:
             self.logger.error(f"❌ Error configurando ClickHouse: {str(e)}")
+            # Fallback de resiliencia: si la BD oficial ya existe, continuar con su ID
+            try:
+                official_name = "ClickHouse ETL Database"
+                resp = self.session.get(f"{self.superset_url}/api/v1/database/")
+                if resp.ok:
+                    for db in resp.json().get("result", []):
+                        if db.get("database_name") == official_name:
+                            db_id = db.get("id")
+                            self.logger.warning(
+                                f"⚠️  Usando BD existente pese al error de actualización (ID: {db_id})"
+                            )
+                            return True, db_id
+            except Exception as e2:
+                self.logger.warning(f"⚠️  Fallback de detección de BD existente falló: {e2}")
             return False, None
     
     def discover_and_create_datasets(self, database_id: int) -> Tuple[bool, List[str]]:

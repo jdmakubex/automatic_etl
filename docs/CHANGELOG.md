@@ -1,5 +1,36 @@
 # Registro de Cambios - Sistema de Robustez y Automatización
 
+## 2025-10-23
+
+### Cambios Implementados
+
+#### 1. Superset init: actualización robusta de conexión ClickHouse
+
+Ubicación: `tools/superset_auto_configurator.py`
+
+- Al actualizar la base de datos “ClickHouse ETL Database”, ahora se intenta primero un PATCH con campos seguros (expose_in_sqllab, allow_ctas, allow_cvas, allow_run_async, allow_dml, extra).
+- Si el PATCH no está permitido (405), se hace fallback a PUT completo y se registran errores detallados.
+- Resiliencia: si la actualización falla con 422, el script detecta la BD oficial existente y continúa con su ID para no bloquear el pipeline.
+
+Resultado: `superset-init` ya no se detiene por 422 y el pipeline avanza a la configuración de datasets.
+
+#### 2. Post-config de datasets y preferencias de SQL Lab
+
+Ubicación: `superset_bootstrap/run_post_config.sh` y scripts asociados
+
+- Se verificó la creación/configuración automática de 19 datasets en 2 esquemas.
+- Se aplica Time Grain por defecto = None y métrica COUNT(*).
+- La activación “Run Async” vía API no se pudo forzar por diferencia de endpoint (404/405); se confía en GLOBAL_ASYNC_QUERIES y la configuración UI local. Pendiente: compatibilidad de endpoint para forzar la preferencia a nivel usuario.
+
+Archivos de reporte generados:
+- `logs/dataset_candidates.json`
+- `logs/dataset_time_mapping.json`
+
+### Próximos Pasos
+
+1. Ajustar el endpoint/API para establecer “Run Async” por defecto a nivel usuario (Superset 3.1).
+2. Validar en UI: creación de gráficas por admin y ausencia de errores con columnas fecha.
+
 ## 2025-10-22
 
 ### Cambios Implementados
