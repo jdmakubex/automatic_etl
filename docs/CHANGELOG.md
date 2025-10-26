@@ -1,5 +1,23 @@
 # Registro de Cambios - Sistema de Robustez y Automatización
 
+## 2025-10-24
+
+### Validación de ingesta ETL y datos en ClickHouse
+
+- Se revisaron los logs de ingesta (`logs/ingest_runner.log`, `logs/ingest_status.json`) y se confirmó éxito: más de 34,000 filas procesadas y 11 tablas actualizadas.
+- Validación directa en ClickHouse:
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__bitacora`: 513,344 filas
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__ofeindisdup`: 209,171 filas
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__cieps`: 66 filas
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__formatovic`: 106 filas
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__cieps_formatovic`: 129 filas
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__agrupadoai`: 18 filas
+  - `fiscalizacion.src__fiscalizacion__fiscalizacion__altoimpacto`: 44 filas
+- No se detectaron errores ni advertencias relevantes en la ingesta.
+- Siguiente paso: Validar creación de gráficas y queries en Superset UI usando estos datos.
+
+---
+
 ## 2025-10-23
 
 ### Cambios Implementados
@@ -374,6 +392,17 @@ echo "👤 Usuario: ${SUPERSET_USERNAME:-admin} / Contraseña: $ADMIN_PASSWORD"
 
 ---
 
+#### 4. Automatización post-ingesta: filtrado y permisos en Superset
+
+Ubicación: `tools/superset_post_configurator.py`
+
+- Script que, tras la ingesta ETL, filtra los esquemas/tablas visibles en Superset para mostrar solo los modelos declarados en el pipeline/config.
+- Ajusta roles y permisos para el usuario admin y roles estándar, asegurando acceso total y posibilidad de crear charts.
+- Corrige la metadata de los datasets (time column, métricas, acceso).
+- El flujo es replicable para cualquier base de datos declarada en el pipeline.
+
+---
+
 ### Próximos Cambios Necesarios
 
 Según feedback del usuario, aún faltan:
@@ -487,3 +516,24 @@ Intento 7+: 30s (límite máximo)
 7. superset-init (completed) → crea admin
 8. superset-datasets (completed) → configura datasets
 ```
+
+---
+
+### Estado y checklist de depuración Superset UI (2025-10-24)
+
+- Validación automatizada: admin puede autenticarse, ver 19 datasets y acceder al formulario de creación de charts.
+- Configuración async global habilitada y base ClickHouse ETL correctamente registrada.
+- Problemas detectados:
+  - Aparecen esquemas/tablas no deseados en la UI (más allá de los declarados en el JSON/env).
+  - Íconos de advertencia en las tablas (posibles incidencias de metadata, time column, permisos o acceso).
+  - El usuario admin está limitado para crear charts libremente.
+- No hay errores críticos en los logs de Superset, solo advertencias menores de configuración.
+
+Checklist de depuración:
+1. Revisar y ajustar permisos/roles en Superset para admin y otros usuarios.
+2. Validar que los datasets expuestos en Superset correspondan solo a los modelos/tablas deseados.
+3. Revisar la metadata de los datasets: columnas clave, time column, métricas y acceso.
+4. Analizar los íconos de advertencia en la UI y buscar detalles en los logs.
+5. Documentar cualquier cambio y resultado en este CHANGELOG.
+
+---
