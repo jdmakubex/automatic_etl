@@ -202,7 +202,7 @@ class SupersetAutoConfigurator:
         try:
             self.logger.info("🔐 Autenticando con Superset...")
             
-            # Login
+           
             login_payload = {
                 "username": self.admin_config['username'],
                 "password": self.admin_config['password'],
@@ -285,7 +285,8 @@ class SupersetAutoConfigurator:
                 "metadata_params": {},
                 "engine_params": {
                     "connect_args": {
-                        "http_session_timeout": 60
+                        "http_session_timeout": 60,
+                            "use_numpy": True
                     }
                 },
                 "metadata_cache_timeout": {},
