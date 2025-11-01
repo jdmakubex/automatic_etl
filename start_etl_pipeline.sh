@@ -128,19 +128,23 @@ FASES DE INICIALIZACIÓN AUTOMÁTICA:
   3. 🔍 Descubrimiento automático de esquemas MySQL
   4. 🏗️  Creación de modelos optimizados en ClickHouse
   5. 🔌 Despliegue automático de conectores Debezium
-  6. ✅ Validación completa del pipeline
+  6. 🧹 Depuración automática de esquemas
+  7. 🔧 Configuración automática de Metabase
+  8. ✅ Validación completa del pipeline
 
 SERVICIOS INCLUIDOS:
   - ClickHouse (base de datos analítica)
   - Kafka + Kafka Connect (streaming de datos)
-  - Superset (visualización)
+  - Superset (visualización de datos)
+  - Metabase (análisis y dashboards)
   - Orquestador automático (inicialización)
 
 LOGS:
   Los logs detallados se guardan en ./logs/
   
-PUERTO DE ACCESO:
-  - Superset: http://localhost:8088 (admin/Admin123!)
+PUERTOS DE ACCESO:
+  - Superset: http://localhost:8088 (${SUPERSET_ADMIN:-admin}/${SUPERSET_PASSWORD:-Admin123!})
+  - Metabase: http://localhost:3000 (${METABASE_ADMIN:-admin@admin.com}/${METABASE_PASSWORD:-Admin123!})
   - ClickHouse: http://localhost:8123
   - Kafka Connect: http://localhost:8083
 
@@ -237,6 +241,32 @@ start_services() {
     print_success "Servicios iniciados"
 }
 
+# Función para verificar comunicación entre servicios
+test_service_connectivity() {
+    echo "🔧 Ejecutando verificación ROBUSTA de conectividad..."
+    
+    # Probar primero el sistema robusto directamente
+    if python3 tools/robust_service_tester.py; then
+        echo "✅ Verificación ROBUSTA completada - Todos los servicios al 100%"
+        return 0
+    else
+        echo "⚠️ Sistema robusto detectó problemas, intentando configurador unificado..."
+        if python3 tools/unified_configurator.py; then
+            echo "✅ Conectividad básica verificada"
+            return 0
+        else
+            echo "❌ Problemas persistentes de conectividad"
+            echo "💡 Ejecutando diagnósticos adicionales..."
+            
+            # Mostrar estado de contenedores para diagnóstico
+            echo "📋 Estado de contenedores:"
+            docker compose ps
+            
+            return 1
+        fi
+    fi
+}
+
 # Función para esperar que los servicios estén listos
 wait_for_services() {
     print_info "Esperando a que los servicios estén listos..."
@@ -267,25 +297,30 @@ wait_for_services() {
         return 1
     fi
     
-        # Esperar Kafka (health + operación básica)
+        # Esperar Kafka usando sistema robusto
         print_info "Esperando Kafka..."
-        timeout 240 bash -c '
-            cid=$(docker compose ps -q kafka)
-            until [ -n "$cid" ]; do sleep 2; cid=$(docker compose ps -q kafka); done
-            until [ "$(docker inspect -f "{{.State.Health.Status}}" "$cid")" = "healthy" ]; do sleep 2; done
-            # Validar que kafka-topics funciona dentro del contenedor
-            for i in $(seq 1 10); do
-                if docker compose exec -T kafka kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
-                    exit 0
-                fi
-                sleep 2
-            done
-            exit 1
-        ' || {
-                print_error "Kafka no respondió en tiempo esperado"
-                return 1
-        }
-        print_success "Kafka listo"
+        if python3 tools/quick_health_check.py >/dev/null 2>&1; then
+            print_success "Kafka listo (verificación robusta)"
+        else
+            # Fallback a verificación básica si el sistema robusto falla
+            timeout 240 bash -c '
+                cid=$(docker compose ps -q kafka)
+                until [ -n "$cid" ]; do sleep 2; cid=$(docker compose ps -q kafka); done
+                until [ "$(docker inspect -f "{{.State.Health.Status}}" "$cid")" = "healthy" ]; do sleep 2; done
+                # Validar que kafka-topics funciona dentro del contenedor
+                for i in $(seq 1 10); do
+                    if docker compose exec -T kafka kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+                        exit 0
+                    fi
+                    sleep 2
+                done
+                exit 1
+            ' || {
+                    print_error "Kafka no respondió en tiempo esperado"
+                    return 1
+            }
+            print_success "Kafka listo"
+        fi
     
     # Esperar Kafka Connect
     print_info "Esperando Kafka Connect..."
@@ -395,7 +430,8 @@ show_final_status() {
     # Información de acceso
     echo -e "${CYAN}"
     echo "🌐 ACCESO A SERVICIOS:"
-    echo "   📊 Superset:      http://localhost:8088  (admin/Admin123!)"
+    echo "   📊 Superset:      http://localhost:8088  (${SUPERSET_ADMIN:-admin}/${SUPERSET_PASSWORD:-Admin123!})"
+    echo "   📈 Metabase:      http://localhost:3000  (${METABASE_ADMIN:-admin@admin.com}/${METABASE_PASSWORD:-Admin123!})"
     echo "   🏠 ClickHouse:    http://localhost:8123"
     echo "   🔌 Kafka Connect: http://localhost:8083/connectors"
     echo ""
@@ -439,6 +475,9 @@ main() {
     print_header "🔍 FASE 3: ESPERANDO SERVICIOS BASE"
     wait_for_services
 
+    print_header "🌐 FASE 3.5: VERIFICACIÓN DE CONECTIVIDAD"
+    test_service_connectivity
+
     print_header "🤖 FASE 4: ORQUESTACIÓN AUTOMÁTICA Y PROGRESO"
     if show_orchestration_status; then
         print_success "🎉 Pipeline ETL iniciado exitosamente"
@@ -446,7 +485,52 @@ main() {
         print_warning "⚠️  Pipeline ETL iniciado con advertencias"
     fi
 
-    print_header "📊 FASE 5: ESTADO FINAL Y ACCESO"
+    print_header "🧹 FASE 5: DEPURACIÓN AUTOMÁTICA DE ESQUEMAS"
+    if [ -f "$SCRIPT_DIR/tools/schema_cleaner.py" ]; then
+        print_info "Depurando esquemas innecesarios y configurando herramientas de análisis..."
+        python3 "$SCRIPT_DIR/tools/schema_cleaner.py" || print_warning "No se pudo ejecutar la depuración automática"
+    else
+        print_warning "Script de depuración no encontrado"
+    fi
+
+    print_header "� FASE 6: CONFIGURACIÓN AUTOMÁTICA DE METABASE"
+    print_info "Configurando Metabase con ClickHouse usando credenciales .env..."
+    
+    # Verificar si Metabase está corriendo
+    if docker-compose ps metabase | grep -q "Up"; then
+        if [ -f "$SCRIPT_DIR/tools/metabase_smart_config.py" ]; then
+            print_info "Ejecutando configuración inteligente de Metabase..."
+            python3 "$SCRIPT_DIR/tools/metabase_smart_config.py"
+            
+            if [ $? -eq 0 ]; then
+                print_success "✅ Metabase configurado exitosamente"
+                print_info "   🔗 URL: http://localhost:3000"
+                print_info "   👤 Usuario: ${METABASE_ADMIN:-admin@admin.com} (credenciales .env)"
+                print_info "   🔑 Contraseña: ${METABASE_PASSWORD:-Admin123!}"
+                print_info "   📊 ClickHouse ETL conectado y funcional"
+            else
+                print_warning "⚠️  Configuración de Metabase incompleta"
+                print_info "   Posibles causas: Metabase iniciando, conexión ClickHouse"
+                print_info "   Configuración manual: http://localhost:3000"
+                print_info "   Script individual: python3 tools/metabase_smart_config.py"
+            fi
+        else
+            print_warning "Script de configuración inteligente no encontrado"
+            print_info "   Usando configuración básica..."
+            
+            # Fallback al script básico
+            if [ -f "$SCRIPT_DIR/tools/metabase_add_clickhouse.py" ]; then
+                python3 "$SCRIPT_DIR/tools/metabase_add_clickhouse.py"
+            fi
+        fi
+    else
+        print_warning "Metabase no está corriendo - omitiendo configuración"
+        print_info "   Para configurar manualmente después del inicio:"
+        print_info "   docker-compose up -d metabase"
+        print_info "   python3 tools/metabase_smart_config.py"
+    fi
+
+    print_header "�📊 FASE 7: ESTADO FINAL Y ACCESO"
     show_final_status
 
     # Ejecutar validación automática del pipeline y mostrar resultado

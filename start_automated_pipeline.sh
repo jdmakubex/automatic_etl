@@ -30,6 +30,17 @@ if ! docker compose version &> /dev/null; then
 fi
 
 echo "✅ Docker y Docker Compose disponibles"
+
+# Validar configuración de variables de entorno
+echo "🔍 Validando configuración de seguridad..."
+if docker compose exec etl-tools python3 tools/validate_environment.py > /dev/null 2>&1; then
+    echo "✅ Variables de entorno configuradas correctamente"
+else
+    echo "❌ Problema en configuración de variables de entorno"
+    echo "    Ejecuta: docker compose exec etl-tools python3 tools/validate_environment.py"
+    echo "    para ver detalles del problema"
+    exit 1
+fi
 echo
 
 # Mostrar estado actual
@@ -49,6 +60,7 @@ echo "🚀 Iniciando todos los servicios..."
 echo "   Esto incluye:"
 echo "   • ClickHouse (base de datos analítica)"
 echo "   • Kafka + Debezium Connect (CDC)"
+echo "   • Configuración automática de permisos ETL"
 echo "   • Superset (interfaz de dashboards)"
 echo "   • Orquestador ETL (automatización)"
 echo
@@ -61,8 +73,20 @@ echo "⏳ El orquestador comenzará automáticamente..."
 echo
 
 # Esperar un momento para que los servicios se estabilicen
-echo "⏳ Esperando estabilización inicial (30s)..."
-sleep 30
+echo "⏳ Esperando estabilización inicial (15s)..."
+sleep 15
+
+# CONFIGURACIÓN AUTOMÁTICA DE PERMISOS ETL
+echo "🔧 Configurando permisos ETL automáticamente..."
+if docker compose exec etl-tools python3 tools/etl_permissions_setup.py > /dev/null 2>&1; then
+    echo "✅ Permisos ETL configurados correctamente"
+else
+    echo "⚠️  Advertencia: Algunos permisos ETL pueden requerir configuración manual"
+    echo "    Revisa logs/etl_permissions_setup.log para detalles"
+fi
+
+echo "⏳ Esperando estabilización final (15s)..."
+sleep 15
 
 echo "📊 Iniciando monitor en tiempo real..."
 echo "   (Puedes presionar Ctrl+C para detener el monitor sin afectar el pipeline)"
